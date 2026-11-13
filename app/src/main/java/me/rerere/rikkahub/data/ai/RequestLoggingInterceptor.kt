@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.ai
 
 import me.rerere.common.android.LogEntry
 import me.rerere.common.android.Logging
+import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.Response
 import okio.Buffer
@@ -32,7 +33,7 @@ class RequestLoggingInterceptor : Interceptor {
             Logging.logRequest(
                 LogEntry.RequestLog(
                     tag = "HTTP",
-                    url = request.url.toString(),
+                    url = request.url.toRedactedLogUrl(),
                     method = request.method,
                     requestHeaders = requestHeaders,
                     requestBody = requestBody,
@@ -48,7 +49,7 @@ class RequestLoggingInterceptor : Interceptor {
         Logging.logRequest(
             LogEntry.RequestLog(
                 tag = "HTTP",
-                url = request.url.toString(),
+                url = request.url.toRedactedLogUrl(),
                 method = request.method,
                 requestHeaders = requestHeaders,
                 requestBody = requestBody,
@@ -64,11 +65,48 @@ class RequestLoggingInterceptor : Interceptor {
 
     private fun okhttp3.Headers.toMap(): Map<String, String> {
         return names().associateWith { name ->
-            if (name.equals("Proxy-Authorization", ignoreCase = true)) {
+            if (name.lowercase() in SENSITIVE_HEADERS) {
                 "██"
             } else {
                 get(name) ?: ""
             }
         }
+    }
+
+    private fun HttpUrl.toRedactedLogUrl(): String {
+        val builder = newBuilder()
+        if (username.isNotEmpty()) builder.username("REDACTED")
+        if (password.isNotEmpty()) builder.password("REDACTED")
+        queryParameterNames
+            .filter { it.lowercase() in SENSITIVE_QUERY_PARAMETERS }
+            .forEach { builder.setQueryParameter(it, "REDACTED") }
+        return builder.build().toString()
+    }
+
+    private companion object {
+        val SENSITIVE_HEADERS = setOf(
+            "authorization",
+            "proxy-authorization",
+            "x-api-key",
+            "x-goog-api-key",
+            "api-key",
+            "x-auth-token",
+            "x-access-token",
+            "cookie",
+            "set-cookie",
+            "x-amz-security-token",
+        )
+
+        val SENSITIVE_QUERY_PARAMETERS = setOf(
+            "key",
+            "api_key",
+            "apikey",
+            "access_token",
+            "auth_token",
+            "token",
+            "authorization",
+            "client_secret",
+            "signature",
+        )
     }
 }
