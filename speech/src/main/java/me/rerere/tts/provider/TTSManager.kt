@@ -31,6 +31,11 @@ class TTSManager(private val context: Context) {
     private val fishAudioProvider = FishAudioTTSProvider()
     private val volcengineProvider = VolcengineTTSProvider()
 
+    /** Prewarm only for voice mode when the selected provider is Android system TTS. */
+    fun setSystemVoiceModeActive(active: Boolean) {
+        systemProvider.setVoiceModeActive(context, active)
+    }
+
     fun generateSpeech(
         providerSetting: TTSProviderSetting,
         request: TTSRequest

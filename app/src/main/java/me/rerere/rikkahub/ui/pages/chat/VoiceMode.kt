@@ -49,12 +49,22 @@ fun rememberVoiceModeStarter(vm: ChatVM, settings: Settings): () -> Unit {
     PermissionManager(permission)
     val voice = vm.voiceSession
     val state by voice.state.collectAsStateWithLifecycle()
+    // Prewarm the system TTS engine only for an active voice session.
+    DisposableEffect(state.isActive, tts) {
+        tts.setVoiceModeActive(state.isActive)
+        onDispose {
+            if (state.isActive) tts.setVoiceModeActive(false)
+        }
+    }
     val provider = settings.getSelectedASRProvider()
     val lifecycleOwner = LocalLifecycleOwner.current
 
     DisposableEffect(voice, lifecycleOwner, provider, settings.getSelectedTTSProvider()) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) voice.stop()
+            if (event == Lifecycle.Event.ON_STOP) {
+                voice.stop()
+                tts.setVoiceModeActive(false)
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {

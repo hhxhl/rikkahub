@@ -49,6 +49,7 @@ class TtsController(
 
     // Provider & 作业
     private var currentProvider: TTSProviderSetting? = null
+    private var voiceModeActive = false
     private var workerJob: Job? = null
     private var isPaused = false
 
@@ -100,7 +101,16 @@ class TtsController(
     fun setProvider(provider: TTSProviderSetting?) {
         currentProvider = provider
         _isAvailable.update { provider != null }
+        // Switching TTS providers while voice mode is open updates prewarming too.
+        ttsManager.setSystemVoiceModeActive(voiceModeActive && provider is TTSProviderSetting.SystemTTS)
         if (provider == null) stop()
+    }
+
+    /** Called by the Compose voice session when its active state changes. */
+    fun setVoiceModeActive(active: Boolean) {
+        if (voiceModeActive == active) return
+        voiceModeActive = active
+        ttsManager.setSystemVoiceModeActive(active && currentProvider is TTSProviderSetting.SystemTTS)
     }
 
     /**
@@ -212,6 +222,7 @@ class TtsController(
 
     /** 释放资源 */
     fun dispose() {
+        setVoiceModeActive(false)
         stop()
         scope.cancel()
         audio.release()
@@ -247,8 +258,10 @@ class TtsController(
                         )
                     }
 
-                    // 仅预取当前分片后的固定窗口
-                    prefetchNextChunks(chunk.index)
+                    // System TTS is serialized: finish the first chunk before prefetching.
+                    // Cloud TTS keeps its existing parallel prefetch behavior.
+                    val systemTts = provider is TTSProviderSetting.SystemTTS
+                    if (!systemTts) prefetchNextChunks(chunk.index)
 
                     val response = try {
                         awaitOrCreate(chunk, provider)
@@ -259,6 +272,8 @@ class TtsController(
                         processedCount++
                         continue
                     }
+
+                    if (systemTts) prefetchNextChunks(chunk.index)
 
                     // 播放
                     try {

@@ -113,6 +113,9 @@ interface CustomTtsState {
     /** Set playback [speed]. */
     fun setSpeed(speed: Float)
 
+    /** Notify the TTS controller when voice mode becomes active or inactive. */
+    fun setVoiceModeActive(active: Boolean)
+
     /** Cleanup resources. */
     fun cleanup()
 }
@@ -171,6 +174,10 @@ private class CustomTtsStateImpl(
 
     override fun setSpeed(speed: Float) {
         controller.setSpeed(speed)
+    }
+
+    override fun setVoiceModeActive(active: Boolean) {
+        controller.setVoiceModeActive(active)
     }
 
     override fun cleanup() {
