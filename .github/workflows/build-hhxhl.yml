@@ -1,3 +1,4 @@
+
 name: Build RikkaHub (hhxhl)
 
 # Manual release build from the customization branch only.
@@ -104,8 +105,9 @@ jobs:
       - name: Publish GitHub prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: hhxhl-build-${{ github.run_number }}-${{ github.run_attempt }}
-          name: RikkaHub hhxhl build #${{ github.run_number }}.${{ github.run_attempt }}
+          tag_name: hhxhl-release
+          name: RikkaHub hhxhl Release
+          overwrite_files: true
           prerelease: true
           target_commitish: ${{ github.sha }}
           body: |
