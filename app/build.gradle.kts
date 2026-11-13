@@ -9,8 +9,6 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
-    alias(libs.plugins.google.services)
-    alias(libs.plugins.firebase.crashlytics)
     alias(libs.plugins.baselineprofile)
 }
 
@@ -54,21 +52,23 @@ android {
             val localPropertiesFile = rootProject.file("local.properties")
 
             if (localPropertiesFile.exists()) {
-                localProperties.load(FileInputStream(localPropertiesFile))
+                FileInputStream(localPropertiesFile).use { localProperties.load(it) }
+            }
 
-                val storeFilePath = localProperties.getProperty("storeFile")
-                val storePasswordValue = localProperties.getProperty("storePassword")
-                val keyAliasValue = localProperties.getProperty("keyAlias")
-                val keyPasswordValue = localProperties.getProperty("keyPassword")
+            // CI: read credentials from GitHub Actions secrets via environment variables.
+            // Local development: keep supporting the existing local.properties values.
+            val storeFilePath = System.getenv("SIGNING_STORE_FILE") ?: localProperties.getProperty("storeFile")
+            val storePasswordValue = System.getenv("SIGNING_STORE_PASSWORD") ?: localProperties.getProperty("storePassword")
+            val keyAliasValue = System.getenv("SIGNING_KEY_ALIAS") ?: localProperties.getProperty("keyAlias")
+            val keyPasswordValue = System.getenv("SIGNING_KEY_PASSWORD") ?: localProperties.getProperty("keyPassword")
 
-                if (storeFilePath != null && storePasswordValue != null &&
-                    keyAliasValue != null && keyPasswordValue != null
-                ) {
-                    storeFile = file(storeFilePath)
-                    storePassword = storePasswordValue
-                    keyAlias = keyAliasValue
-                    keyPassword = keyPasswordValue
-                }
+            if (storeFilePath != null && storePasswordValue != null &&
+                keyAliasValue != null && keyPasswordValue != null
+            ) {
+                storeFile = file(storeFilePath)
+                storePassword = storePasswordValue
+                keyAlias = keyAliasValue
+                keyPassword = keyPasswordValue
             }
         }
     }
@@ -219,11 +219,6 @@ dependencies {
     implementation(libs.androidx.navigation3.ui)
     implementation(libs.androidx.lifecycle.viewmodel.navigation3)
     implementation(libs.androidx.material3.adaptive.navigation3)
-
-    // Firebase
-    implementation(platform(libs.firebase.bom))
-    implementation(libs.firebase.analytics)
-    implementation(libs.firebase.crashlytics)
 
     // DataStore
     implementation(libs.androidx.datastore.preferences)
