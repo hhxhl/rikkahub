@@ -1858,4 +1858,6 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="chat_message_tool_phone_use_open_app_name">打开应用：%1$s</string>
   <string name="chat_message_tool_phone_use_list_apps">列出应用</string>
   <string name="chat_message_tool_phone_use_wait">等待 %1$s 秒</string>
+  <string name="setting_assistant_start_voice_title">通过系统数字助理启动语音对话</string>
+  <string name="setting_assistant_start_voice_desc">通过系统数字助理唤起应用时，若已配置支持语音对话的语音识别服务，则自动进入语音对话模式。</string>
 </resources>

@@ -1856,4 +1856,6 @@
   <string name="chat_message_tool_phone_use_open_app_name">Open app: %1$s</string>
   <string name="chat_message_tool_phone_use_list_apps">List apps</string>
   <string name="chat_message_tool_phone_use_wait">Wait %1$s seconds</string>
+  <string name="setting_assistant_start_voice_title">Start voice conversation from system assistant</string>
+  <string name="setting_assistant_start_voice_desc">When opened as the system digital assistant, enter voice mode automatically if a compatible speech recognition provider is configured.</string>
 </resources>

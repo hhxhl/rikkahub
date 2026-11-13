@@ -31,7 +31,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.semantics
@@ -163,6 +165,7 @@ class RouteActivity : ComponentActivity() {
     private val mediaCreationRepository by inject<MediaCreationRepository>()
     private var navStack: MutableList<NavKey>? = null
     private val pendingIntents = ArrayDeque<Intent>()
+    private var assistantVoiceChatId by mutableStateOf<String?>(null)
 
     // Volume key listener registry — last registered handler wins
     internal val volumeKeyListeners = mutableListOf<(isVolumeUp: Boolean) -> Boolean>()
@@ -234,6 +237,14 @@ class RouteActivity : ComponentActivity() {
         val backStack = navStack ?: run {
             // Compose 尚未创建导航栈，待就绪后处理。
             pendingIntents.addLast(intent)
+            return
+        }
+        if (intent.action == Intent.ACTION_ASSIST) {
+            val chat = (backStack.lastOrNull() as? Screen.Chat) ?: Screen.Chat(Uuid.random().toString()).also {
+                backStack.add(it)
+            }
+            // A one-shot request scoped to this chat, not a permanent "voice enabled" flag.
+            assistantVoiceChatId = if (readBooleanPreference("assistant_start_voice_mode", false)) chat.id else null
             return
         }
         val destination = when (intent.action) {
@@ -359,7 +370,11 @@ class RouteActivity : ComponentActivity() {
                                     id = Uuid.parse(key.id),
                                     text = key.text,
                                     files = key.files.map { it.toUri() },
-                                    nodeId = key.nodeId?.let { Uuid.parse(it) }
+                                    nodeId = key.nodeId?.let { Uuid.parse(it) },
+                                    assistantVoiceRequested = assistantVoiceChatId == key.id,
+                                    onAssistantVoiceRequestHandled = {
+                                        if (assistantVoiceChatId == key.id) assistantVoiceChatId = null
+                                    }
                                 )
                             }
 
