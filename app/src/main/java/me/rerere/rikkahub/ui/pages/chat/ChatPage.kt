@@ -335,6 +335,7 @@ private fun ChatPageContent(
     val toaster = LocalToaster.current
     val workspaceRepository: WorkspaceRepository = koinInject()
     val sessionActivity by vm.sessionActivity.collectAsStateWithLifecycle()
+    val voiceState by vm.voiceSession.state.collectAsStateWithLifecycle()
 
     var previewMode by rememberSaveable { mutableStateOf(false) }
     val selectionState = rememberChatSelectionState()
@@ -414,7 +415,6 @@ private fun ChatPageContent(
             },
             bottomBar = {
                 val messageQueue by vm.messageQueue.collectAsStateWithLifecycle()
-                val voiceState by vm.voiceSession.state.collectAsStateWithLifecycle()
                 val backgroundTasks by vm.backgroundTasks.collectAsStateWithLifecycle()
                 var showBackgroundTasks by remember { mutableStateOf(false) }
                 if (showBackgroundTasks) {
@@ -494,6 +494,7 @@ private fun ChatPageContent(
                 previewListState = previewListState,
                 selectionState = selectionState,
                 loading = loadingJob != null,
+                voiceModeActive = voiceState.phase != VoicePhase.Off,
                 compressing = sessionActivity == SessionActivity.Compressing,
                 processingStatus = processingStatus,
                 previewMode = previewMode,

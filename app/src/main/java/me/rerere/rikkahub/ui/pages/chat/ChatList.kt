@@ -2,6 +2,7 @@ package me.rerere.rikkahub.ui.pages.chat
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -82,6 +83,7 @@ fun ChatList(
     previewListState: LazyListState,
     selectionState: ChatSelectionState,
     loading: Boolean,
+    voiceModeActive: Boolean = false,
     compressing: Boolean = false,
     processingStatus: String? = null,
     previewMode: Boolean,
@@ -144,6 +146,7 @@ fun ChatList(
                 conversation = conversation,
                 state = state,
                 loading = loading,
+                voiceModeActive = voiceModeActive,
                 compressing = compressing,
                 processingStatus = processingStatus,
                 settings = settings,
@@ -216,6 +219,7 @@ private fun ChatListNormal(
     conversation: Conversation,
     state: LazyListState,
     loading: Boolean,
+    voiceModeActive: Boolean,
     compressing: Boolean,
     processingStatus: String? = null,
     settings: Settings,
@@ -239,6 +243,7 @@ private fun ChatListNormal(
 ) {
     val scope = rememberCoroutineScope()
     val loadingState by rememberUpdatedState(loading)
+    val isUserDragging by state.interactionSource.collectIsDraggedAsState()
     var isRecentScroll by remember { mutableStateOf(false) }
     val conversationUpdated by rememberUpdatedState(conversation)
     val density = LocalDensity.current
@@ -300,16 +305,52 @@ private fun ChatListNormal(
         modifier = Modifier
             .fillMaxSize(),
     ) {
-        // 自动滚动到底部
-        if (settings.displaySetting.enableAutoScroll) {
+        // Keep the original auto-scroll behaviour for text chat.
+        if (settings.displaySetting.enableAutoScroll && !voiceModeActive) {
             LaunchedEffect(state) {
                 snapshotFlow { state.layoutInfo.visibleItemsInfo }.collect { visibleItemsInfo ->
-                    // println("is bottom = ${visibleItemsInfo.isAtBottom()}, scroll = ${state.isScrollInProgress}, can_scroll = ${state.canScrollForward}, loading = $loading")
-                    if (!state.isScrollInProgress && loadingState) {
-                        if (visibleItemsInfo.isAtBottom()) {
-                            state.requestScrollToItem(conversationUpdated.messageNodes.lastIndex + 10)
-                            // Log.i(TAG, "ChatList: scroll to ${conversationUpdated.messageNodes.lastIndex}")
-                        }
+                    if (!state.isScrollInProgress && loadingState && visibleItemsInfo.isAtBottom()) {
+                        state.requestScrollToItem(conversationUpdated.messageNodes.lastIndex + 10)
+                    }
+                }
+            }
+        }
+
+        // Voice replies can grow without changing the number of messages or the loading job.
+        // Keep following the bottom until the user drags away; resume once they reach it again.
+        if (settings.displaySetting.enableAutoScroll && voiceModeActive) {
+            LaunchedEffect(state) {
+                var followingBottom = true
+                var userWasDragging = false
+
+                // Entering voice mode should bring the latest messages into view.
+                val initialLast = state.layoutInfo.totalItemsCount - 1
+                if (initialLast >= 0) state.requestScrollToItem(initialLast)
+
+                snapshotFlow {
+                    val layout = state.layoutInfo
+                    val lastVisible = layout.visibleItemsInfo.lastOrNull()
+                    Triple(
+                        layout.totalItemsCount,
+                        lastVisible?.let { it.index to (it.offset + it.size) },
+                        isUserDragging to state.canScrollForward,
+                    )
+                }.collect { (itemCount, _, scrollState) ->
+                    val (dragging, canScrollForward) = scrollState
+                    if (dragging) {
+                        userWasDragging = true
+                        followingBottom = false
+                    } else if (userWasDragging) {
+                        userWasDragging = false
+                        followingBottom = !canScrollForward
+                    } else if (!canScrollForward) {
+                        followingBottom = true
+                    }
+
+                    if (followingBottom && !dragging && !state.isScrollInProgress &&
+                        canScrollForward && itemCount > 0
+                    ) {
+                        state.requestScrollToItem(itemCount - 1)
                     }
                 }
             }
