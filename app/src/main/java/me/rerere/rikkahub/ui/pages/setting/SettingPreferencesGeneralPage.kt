@@ -78,7 +78,16 @@ fun SettingPreferencesGeneralPage(vm: SettingVM = koinViewModel()) {
                     "create_new_conversation_on_start",
                     true
                 )
+                var assistantStartVoiceMode by rememberSharedPreferenceBoolean(
+                    "assistant_start_voice_mode", false
+                )
                 CardGroup {
+                    switchItem(
+                        checked = assistantStartVoiceMode,
+                        onCheckedChange = { assistantStartVoiceMode = it },
+                        headlineContent = { Text(stringResource(R.string.setting_assistant_start_voice_title)) },
+                        supportingContent = { Text(stringResource(R.string.setting_assistant_start_voice_desc)) },
+                    )
                     switchItem(
                         checked = createNewConversationOnStart,
                         onCheckedChange = { createNewConversationOnStart = it },

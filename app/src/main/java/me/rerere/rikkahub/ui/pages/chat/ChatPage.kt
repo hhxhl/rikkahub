@@ -56,7 +56,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.currentStateAsState
 import me.rerere.ui.components.RikkaConfirmDialog
 import me.rerere.ui.toast.ToastType
 import dev.chrisbanes.haze.HazeState
@@ -109,7 +112,14 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.uuid.Uuid
 
 @Composable
-fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
+fun ChatPage(
+    id: Uuid,
+    text: String?,
+    files: List<Uri>,
+    nodeId: Uuid? = null,
+    assistantVoiceRequested: Boolean = false,
+    onAssistantVoiceRequestHandled: () -> Unit = {},
+) {
     val vm: ChatVM = koinViewModel(
         parameters = {
             parametersOf(id.toString())
@@ -166,6 +176,25 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
     }
 
     val startVoiceMode = rememberVoiceModeStarter(vm, setting)
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    LaunchedEffect(assistantVoiceRequested, setting.init, currentChatModel, lifecycleState) {
+        // A warm assistant launch may arrive while the previous chat Activity is still
+        // stopped/paused. Keep the one-shot request until this page is resumed so
+        // microphone capture is not started prematurely in the background.
+        if (assistantVoiceRequested &&
+            lifecycleState.isAtLeast(Lifecycle.State.RESUMED) &&
+            !setting.init && currentChatModel != null
+        ) {
+            // Consume the request even when ASR is unavailable, so navigating back here
+            // never unexpectedly launches voice mode again.
+            onAssistantVoiceRequestHandled()
+            if (setting.getSelectedASRProvider()?.supportsServerVadVoiceMode == true &&
+                vm.voiceSession.state.value.phase == VoicePhase.Off
+            ) {
+                startVoiceMode()
+            }
+        }
+    }
 
     val inputState = vm.inputState
 
