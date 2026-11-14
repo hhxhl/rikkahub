@@ -1249,9 +1249,9 @@
   <string name="chat_page_delete_folder_generating">此資料夾中的部分對話仍在生成中。請先停止它們再刪除。</string>
   <string name="setting_display_page_tts_read_outside_brackets_title">TTS 不朗讀括號內的內容</string>
   <string name="setting_display_page_tts_filter_emoji_title">TTS 過濾 Emoji</string>
-  <string name="setting_display_page_tts_filter_emoji_desc">朗讀時將 Emoji 取代為空格，聊天內容保持不變</string>
+  <string name="setting_display_page_tts_filter_emoji_desc">朗讀時將句中 Emoji 換成逗號以產生停頓，句首句尾及標點旁直接移除；聊天內容不變</string>
   <string name="setting_display_page_tts_filter_tilde_title">TTS 過濾波浪號</string>
-  <string name="setting_display_page_tts_filter_tilde_desc">數字之間的 ~ 取代為「到」，句首句尾移除，其他位置換成空格；聊天內容不變</string>
+  <string name="setting_display_page_tts_filter_tilde_desc">數字之間的 ~ 換成「到」，句首句尾和標點旁移除，句中換成逗號；聊天內容不變</string>
   <string name="setting_display_page_tts_read_outside_brackets_desc">啟用後，TTS 將不朗讀括號內的內容</string>
   <string name="assistant_page_context_message_limit">上下文訊息限制</string>
   <string name="assistant_page_context_message_limit_desc">限制傳送給模型的最近訊息數量</string>

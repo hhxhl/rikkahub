@@ -821,9 +821,9 @@
   <string name="setting_display_page_tts_read_outside_brackets_desc">عند التمكين، لن يقرأ TTS المحتوى الموجود داخل الأقواس</string>
   <string name="setting_display_page_tts_read_outside_brackets_title">تخطي TTS للمحتوى بين الأقواس</string>
   <string name="setting_display_page_tts_filter_emoji_title">تصفية الإيموجي في TTS</string>
-  <string name="setting_display_page_tts_filter_emoji_desc">استبدال الإيموجي بمسافات أثناء النطق دون تغيير رسائل الدردشة</string>
+  <string name="setting_display_page_tts_filter_emoji_desc">استبدال الإيموجي داخل الجملة بفاصلة لإضافة وقفة قصيرة، وحذفها عند الأطراف أو بجانب علامات الترقيم دون تغيير رسائل الدردشة</string>
   <string name="setting_display_page_tts_filter_tilde_title">تصفية علامة ~ في TTS</string>
-  <string name="setting_display_page_tts_filter_tilde_desc">استبدال ~ بين رقمين بكلمة 到، وحذفها في بداية الجملة ونهايتها، واستبدالها بمسافة في غير ذلك دون تغيير نص الدردشة</string>
+  <string name="setting_display_page_tts_filter_tilde_desc">استبدال ~ بين رقمين بكلمة 到، وحذفها عند أطراف الجملة أو بجانب علامات الترقيم، واستبدالها بفاصلة في وسط الكلام دون تغيير نص الدردشة</string>
   <string name="setting_display_page_volume_key_scroll_desc">تمرير الصفحات باستخدام مفاتيح الصوت، مثالي لشاشات الحبر الإلكتروني</string>
   <string name="setting_display_page_volume_key_scroll_ratio">مقدار التمرير</string>
   <string name="setting_display_page_volume_key_scroll_title">تمرير الصفحات بمفاتيح الصوت</string>

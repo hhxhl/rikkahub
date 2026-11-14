@@ -721,9 +721,9 @@
   <string name="setting_display_page_tts_read_outside_brackets_desc">When enabled, TTS will not read content inside brackets</string>
   <string name="setting_display_page_tts_read_outside_brackets_title">TTS Skip Bracketed Content</string>
   <string name="setting_display_page_tts_filter_emoji_title">TTS: Filter Emoji</string>
-  <string name="setting_display_page_tts_filter_emoji_desc">Replace Emoji with spaces when speaking, without changing chat messages.</string>
+  <string name="setting_display_page_tts_filter_emoji_desc">Replace Emoji with short-pause commas where appropriate, without changing chat messages.</string>
   <string name="setting_display_page_tts_filter_tilde_title">TTS: Filter Tildes</string>
-  <string name="setting_display_page_tts_filter_tilde_desc">Convert ~ between numbers to 到; remove it at sentence boundaries or replace it with a space elsewhere. Chat messages remain unchanged.</string>
+  <string name="setting_display_page_tts_filter_tilde_desc">Convert ~ between numbers to 到; remove it at sentence boundaries or use a short-pause comma in the middle. Chat messages remain unchanged.</string>
   <string name="setting_display_page_volume_key_scroll_desc">Scroll pages with volume keys, ideal for e-ink screens</string>
   <string name="setting_display_page_volume_key_scroll_ratio">Scroll Amount</string>
   <string name="setting_display_page_volume_key_scroll_title">Volume Key Page Scroll</string>
