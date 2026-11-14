@@ -17,6 +17,7 @@ import me.rerere.asr.ASRController
 import me.rerere.asr.ASRProviderSetting
 import me.rerere.asr.ASRState
 import me.rerere.asr.ASRStatus
+import me.rerere.asr.ReusableASRController
 import java.util.UUID
 
 /**
@@ -29,7 +30,7 @@ import java.util.UUID
 class SystemASRController(
     context: Context,
     private val provider: ASRProviderSetting.AndroidSystem,
-) : ASRController {
+) : ReusableASRController {
     private val context = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
     private val _state = MutableStateFlow(
@@ -45,6 +46,7 @@ class SystemASRController(
     private var sessionToken = 0
     private var turnId = ""
     private var busyRetries = 0
+    private var disconnectRetries = 0
     private var pendingRetry: Runnable? = null
 
     // SpeechRecognizer callbacks are delivered on the main thread. Keep a single listener
@@ -112,15 +114,8 @@ class SystemASRController(
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> complete("")
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> retryBusy()
-                else -> {
-                    // Preserve real errors, including ERROR_SERVER_DISCONNECTED (11).
-                    fail("Android speech recognition failed (code $error)")
-                    if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED) {
-                        // The existing binder is no longer usable. Release it now,
-                        // but do NOT automatically destroy/create in a tight loop.
-                        releaseRecognizer(cancelFirst = false)
-                    }
-                }
+                SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> retryDisconnected()
+                else -> fail("Android speech recognition failed (code $error)")
             }
         }
 
@@ -136,6 +131,7 @@ class SystemASRController(
             if (disposed || listening || pendingRetry != null) return@onMain
             this.onTranscriptChange = onTranscriptChange
             busyRetries = 0
+            disconnectRetries = 0
             startSession()
         }
     }
@@ -174,13 +170,18 @@ class SystemASRController(
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
 
-        try {
-            getRecognizer().startListening(intent)
-            Log.d(TAG, "startListening session=$sessionToken")
-        } catch (e: Exception) {
-            fail("Unable to start Android speech recognition: ${e.message ?: e.javaClass.simpleName}")
-            // This is an exceptional startup failure, not normal utterance cleanup.
-            releaseRecognizer(cancelFirst = false)
+        // Defer binder start until the previous onResults/onError callback has unwound.
+        // State is already Connecting, so VoiceSessionController cannot see stale turn data.
+        val expectedToken = sessionToken
+        main.post {
+            if (disposed || !listening || finished || expectedToken != sessionToken) return@post
+            try {
+                getRecognizer().startListening(intent)
+                Log.d(TAG, "startListening session=$sessionToken")
+            } catch (e: Exception) {
+                fail("Unable to start Android speech recognition: ${e.message ?: e.javaClass.simpleName}")
+                releaseRecognizer(cancelFirst = false)
+            }
         }
     }
 
@@ -210,13 +211,19 @@ class SystemASRController(
         _state.update { it.copy(status = ASRStatus.Error, errorMessage = message) }
     }
 
-    private fun retryBusy() {
-        if (busyRetries >= MAX_BUSY_RETRIES) {
-            fail("Android speech recognition service is busy")
+    /** A broken binder cannot be reused; make only a bounded, delayed reconnection. */
+    private fun retryDisconnected() {
+        releaseRecognizer(cancelFirst = false)
+        if (disconnectRetries >= MAX_DISCONNECT_RETRIES) {
+            fail("Android speech recognition failed (code ${SpeechRecognizer.ERROR_SERVER_DISCONNECTED})")
             return
         }
-        busyRetries++
-        finished = true // Ignore later callbacks from the failed attempt.
+        disconnectRetries++
+        scheduleRetry(DISCONNECT_RETRY_DELAY_MS * disconnectRetries)
+    }
+
+    private fun scheduleRetry(delayMs: Long) {
+        finished = true // Ignore callbacks from the failed attempt.
         listening = false
         _state.value = ASRState(status = ASRStatus.Connecting, isAvailable = true)
         val expectedToken = ++sessionToken
@@ -228,7 +235,32 @@ class SystemASRController(
             }
         }
         pendingRetry = retry
-        main.postDelayed(retry, BUSY_RETRY_DELAY_MS * busyRetries)
+        main.postDelayed(retry, delayMs)
+    }
+
+    private fun retryBusy() {
+        if (busyRetries >= MAX_BUSY_RETRIES) {
+            fail("Android speech recognition service is busy")
+            return
+        }
+        busyRetries++
+        scheduleRetry(BUSY_RETRY_DELAY_MS * busyRetries)
+    }
+
+    override fun finishTurn() {
+        onMain {
+            if (disposed) return@onMain
+            cancelPendingRetry()
+            // Cancel only an interrupted listen (e.g. for TTS). A completed recognition
+            // must NOT be canceled, because its result is already final.
+            if (listening && !finished) {
+                finished = true
+                listening = false
+                runCatching { recognizer?.cancel() }
+                _state.update { it.copy(status = ASRStatus.Idle) }
+            }
+            onTranscriptChange = null
+        }
     }
 
     override fun stop() {
@@ -256,9 +288,11 @@ class SystemASRController(
     }
 
     private fun cancelPendingRetry() {
-        pendingRetry?.let { main.removeCallbacks(it) }
-        pendingRetry = null
-        ++sessionToken
+        pendingRetry?.let {
+            main.removeCallbacks(it)
+            pendingRetry = null
+            ++sessionToken
+        }
     }
 
     private fun releaseRecognizer(cancelFirst: Boolean) {
@@ -271,8 +305,7 @@ class SystemASRController(
     override fun dispose() {
         onMain {
             if (disposed) return@onMain
-            // A Voice Mode controller is currently disposed after each utterance.
-            // Do not cancel a session that has already completed successfully.
+            // Only disposal of the entire voice session destroys the recognizer.
             val needsCancel = listening && !finished
             disposed = true
             finished = true
@@ -287,5 +320,7 @@ class SystemASRController(
         const val TAG = "SystemASR"
         const val MAX_BUSY_RETRIES = 2
         const val BUSY_RETRY_DELAY_MS = 700L
+        const val MAX_DISCONNECT_RETRIES = 2
+        const val DISCONNECT_RETRY_DELAY_MS = 750L
     }
 }

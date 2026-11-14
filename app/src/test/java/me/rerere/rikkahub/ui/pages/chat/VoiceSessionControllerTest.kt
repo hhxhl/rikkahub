@@ -14,6 +14,7 @@ import me.rerere.asr.ASRController
 import me.rerere.asr.ASRState
 import me.rerere.asr.ASRStatus
 import me.rerere.asr.ASRVoiceTurn
+import me.rerere.asr.ReusableASRController
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.service.ConversationInbox
 import me.rerere.rikkahub.service.nextMessage
@@ -36,6 +37,25 @@ class VoiceSessionControllerTest {
         }
         fun end(text: String? = null) {
             state.value = state.value.copy(voiceTurn = ASRVoiceTurn("a", true, text))
+        }
+    }
+
+    private class FakeReusableAsr : ReusableASRController {
+        override val state = MutableStateFlow(ASRState())
+        var starts = 0
+        var finishedTurns = 0
+        var disposals = 0
+        var pauses = 0
+        override fun start(onTranscriptChange: (String) -> Unit) {
+            starts++
+            state.value = ASRState(status = ASRStatus.Listening)
+        }
+        override fun pauseCapture() { pauses++ }
+        override fun finishTurn() { finishedTurns++ }
+        override fun stop() {}
+        override fun dispose() { disposals++ }
+        fun end(text: String) {
+            state.value = state.value.copy(voiceTurn = ASRVoiceTurn("turn-$starts", true, text))
         }
     }
 
@@ -73,6 +93,70 @@ class VoiceSessionControllerTest {
             return asrs.last()
         }
         fun close() { voice.stop(); scope.cancel() }
+    }
+
+    @Test fun `reusable ASR keeps one controller across turns and disposes only on exit`() = runBlocking<Unit> {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val recognizer = FakeReusableAsr()
+        val accepted = mutableListOf<String>()
+        var creations = 0
+        val voice = VoiceSessionController(scope, getString = { it.toString() }) { text ->
+            accepted.add(text)
+            CompletableDeferred<String?>()
+        }
+        try {
+            voice.start(
+                createAsr = { creations++; recognizer },
+                speak = null,
+                stopSpeaking = {},
+            )
+            awaitCondition { recognizer.starts == 1 }
+            recognizer.end("first")
+            awaitCondition { recognizer.starts == 2 }
+            assertEquals(listOf("first"), accepted)
+            assertEquals(1, creations)
+            assertEquals(1, recognizer.finishedTurns)
+            assertEquals(0, recognizer.disposals)
+
+            recognizer.end("second")
+            awaitCondition { recognizer.starts == 3 }
+            assertEquals(listOf("first", "second"), accepted)
+            assertEquals(1, creations)
+            assertEquals(2, recognizer.finishedTurns)
+        } finally {
+            voice.stop()
+            awaitCondition { recognizer.disposals == 1 }
+            scope.cancel()
+        }
+    }
+
+    @Test fun `interrupted reusable capture releases turn before TTS but not recognizer`() = runBlocking<Unit> {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val recognizer = FakeReusableAsr()
+        val reply = CompletableDeferred<String?>()
+        val playing = CompletableDeferred<Unit>()
+        val voice = VoiceSessionController(scope, getString = { it.toString() }) {
+            reply
+        }
+        try {
+            voice.start(
+                createAsr = { recognizer },
+                speak = { playing.await() },
+                stopSpeaking = {},
+            )
+            awaitCondition { recognizer.starts == 1 }
+            recognizer.end("first")
+            awaitCondition { recognizer.starts == 2 }
+            reply.complete("assistant")
+            awaitCondition { voice.state.value.phase == VoicePhase.Speaking }
+            assertEquals(2, recognizer.finishedTurns)
+            assertEquals(0, recognizer.disposals)
+        } finally {
+            voice.stop()
+            playing.complete(Unit)
+            awaitCondition { recognizer.disposals == 1 }
+            scope.cancel()
+        }
     }
 
     @Test fun `without TTS replies do not interrupt listening`() = runBlocking<Unit> {

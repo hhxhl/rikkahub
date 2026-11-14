@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.first
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.asr.ASRController
 import me.rerere.asr.ASRProviderSetting
+import me.rerere.asr.ReusableASRController
 import me.rerere.asr.providers.DashScopeASRController
 import me.rerere.asr.providers.OpenAIRealtimeASRController
 import me.rerere.asr.providers.SystemASRController
@@ -161,6 +162,49 @@ private fun createVoiceAsr(context: Context, client: OkHttpClient, provider: ASR
                 .build()
         )
         .build()
+    // Keep the system recognizer/binder alive between turns, but release audio focus after
+    // each turn so the AI's TTS can play normally. Online providers retain their old path.
+    if (delegate is ReusableASRController) {
+        return object : ReusableASRController, ASRController by delegate {
+            private var hasFocus = false
+
+            override fun start(onTranscriptChange: (String) -> Unit) {
+                check(audioManager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                    "Unable to acquire audio focus for the microphone. Try again later."
+                }
+                hasFocus = true
+                try {
+                    delegate.start(onTranscriptChange)
+                } catch (e: Exception) {
+                    releaseFocus()
+                    throw e
+                }
+            }
+
+            override fun finishTurn() {
+                try {
+                    delegate.finishTurn()
+                } finally {
+                    releaseFocus()
+                }
+            }
+
+            override fun dispose() {
+                try {
+                    delegate.dispose()
+                } finally {
+                    releaseFocus()
+                }
+            }
+
+            private fun releaseFocus() {
+                if (hasFocus) {
+                    hasFocus = false
+                    audioManager.abandonAudioFocusRequest(focus)
+                }
+            }
+        }
+    }
     return object : ASRController by delegate {
         override fun start(onTranscriptChange: (String) -> Unit) {
             check(audioManager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {

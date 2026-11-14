@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
@@ -19,8 +20,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import me.rerere.asr.ASRController
 import me.rerere.asr.ASRStatus
+import me.rerere.asr.ReusableASRController
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.service.MessageQueuePausedException
 
@@ -91,6 +94,7 @@ class VoiceSessionController(
         val submitted = Channel<Deferred<String?>>(Channel.UNLIMITED)
         val replies = ArrayDeque<String>()
         var asr: ASRController? = null
+        var reusableAsr: ReusableASRController? = null
         var capture: Job? = null
 
         // Await replies in submission order, without blocking capture. Queue removal returns null.
@@ -120,7 +124,9 @@ class VoiceSessionController(
                     mutableState.update { it.copy(phase = VoicePhase.Waiting) }
                 } else if (capture == null) {
                     mutableState.update { it.copy(phase = VoicePhase.Connecting, transcript = "") }
-                    val recorder = createAsr()
+                    val recorder = reusableAsr ?: createAsr().also { created ->
+                        if (created is ReusableASRController) reusableAsr = created
+                    }
                     asr = recorder
                     capture = launch(start = CoroutineStart.UNDISPATCHED) {
                         try {
@@ -153,7 +159,12 @@ class VoiceSessionController(
                 }
             }
         } finally {
-            capture?.cancel()
+            // A reusable Android SpeechRecognizer survives individual turns, but must be
+            // destroyed exactly once on exit. Wait for listen()'s per-turn cleanup first.
+            withContext(NonCancellable) {
+                capture?.cancelAndJoin()
+                reusableAsr?.dispose()
+            }
             // Submitted messages belong to the chat queue; leaving voice mode only detaches observers.
             submitted.close()
         }
@@ -198,7 +209,7 @@ class VoiceSessionController(
                 }.voiceTurn.finalText.orEmpty()
             }
         } finally {
-            asr.dispose()
+            if (asr is ReusableASRController) asr.finishTurn() else asr.dispose()
         }
     }
 
