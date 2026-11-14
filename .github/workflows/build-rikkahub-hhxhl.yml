@@ -1,12 +1,11 @@
-
 name: Build RikkaHub (hhxhl)
 
-# Manual release build from the customization branch only.
+# Manual signed release build; upload APKs to Actions Artifacts only.
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -101,20 +100,3 @@ jobs:
           path: app/build/outputs/apk/github/release/*.apk
           if-no-files-found: error
           retention-days: 30
-
-      - name: Publish GitHub prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: hhxhl-release
-          name: RikkaHub hhxhl Release
-          overwrite_files: true
-          prerelease: true
-          target_commitish: ${{ github.sha }}
-          body: |
-            Custom release build from `master-hhxhl`.
-            Commit: `${{ github.sha }}`
-            Firebase Analytics and Crashlytics removed.
-          files: |
-            app/build/outputs/apk/github/release/*.apk
-            app/build/outputs/mapping/githubRelease/mapping.txt
-          fail_on_unmatched_files: false
