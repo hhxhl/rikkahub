@@ -1250,6 +1250,10 @@
   <string name="chat_page_delete_folder_confirm">Удалить папку "%1$s"? Беседы внутри не будут удалены, только исключены из папки.</string>
   <string name="chat_page_delete_folder_generating">Некоторые беседы в этой папке все еще генерируются. Пожалуйста, остановите их перед удалением.</string>
   <string name="setting_display_page_tts_read_outside_brackets_title">TTS не читает текст в скобках</string>
+  <string name="setting_display_page_tts_filter_emoji_title">TTS: фильтр эмодзи</string>
+  <string name="setting_display_page_tts_filter_emoji_desc">При озвучивании заменять эмодзи пробелами, не изменяя сообщения чата</string>
+  <string name="setting_display_page_tts_filter_tilde_title">TTS: фильтр тильды</string>
+  <string name="setting_display_page_tts_filter_tilde_desc">~ между числами заменяется на «到», в начале и конце предложения удаляется, в остальных местах заменяется пробелом. Сообщения не меняются</string>
   <string name="setting_display_page_tts_read_outside_brackets_desc">Если включено, TTS не будет читать содержимое в скобках</string>
   <string name="assistant_page_context_message_limit">Лимит контекстных сообщений</string>
   <string name="assistant_page_context_message_limit_desc">Ограничивает количество последних сообщений, отправляемых модели.</string>

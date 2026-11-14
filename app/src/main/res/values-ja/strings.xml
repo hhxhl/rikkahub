@@ -1250,6 +1250,10 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="chat_page_delete_folder_confirm">フォルダ "%1$s" を削除しますか？内部の会話は削除されず、フォルダから取り除かれるだけです。</string>
   <string name="chat_page_delete_folder_generating">フォルダ内の一部の会話がまだ生成中です。削除する前にそれらを停止してください。</string>
   <string name="setting_display_page_tts_read_outside_brackets_title">TTS 括弧内を読み上げない</string>
+  <string name="setting_display_page_tts_filter_emoji_title">TTS: 絵文字を除去</string>
+  <string name="setting_display_page_tts_filter_emoji_desc">読み上げ時に絵文字を空白に置き換えます。チャット本文は変更しません</string>
+  <string name="setting_display_page_tts_filter_tilde_title">TTS: 波線をフィルター</string>
+  <string name="setting_display_page_tts_filter_tilde_desc">数字間の ~ は「到」に置換し、文頭・文末では除去、それ以外では空白に置換します。チャット本文は変更しません</string>
   <string name="setting_display_page_tts_read_outside_brackets_desc">有効にすると、TTS は括弧内の内容を読み上げません</string>
   <string name="assistant_page_context_message_limit">コンテキストメッセージ上限</string>
   <string name="assistant_page_context_message_limit_desc">モデルに送信する最近のメッセージ数を制限します。</string>

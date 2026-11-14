@@ -17,6 +17,8 @@ import kotlinx.coroutines.launch
 import me.rerere.tts.model.PlaybackState
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getSelectedTTSProvider
+import me.rerere.rikkahub.utils.removeEmojiForTts
+import me.rerere.rikkahub.utils.normalizeTildeForTts
 import me.rerere.rikkahub.utils.stripMarkdown
 import me.rerere.tts.model.TTSResponse
 import me.rerere.tts.provider.TTSManager
@@ -146,8 +148,21 @@ private class CustomTtsStateImpl(
     }
 
     override fun speak(text: String, flushCalled: Boolean) {
-        val processed = text.stripMarkdown()
-        controller.speak(processed, flushCalled)
+        // Preserve the existing Markdown cleanup, then apply each optional filter independently.
+        // All TTS entry points (chat, auto-play and voice mode) share this path.
+        val displaySetting = settingsStore.settingsFlow.value.displaySetting
+        var processed = text.stripMarkdown()
+        if (displaySetting.ttsFilterEmoji) {
+            processed = processed.removeEmojiForTts()
+        }
+        if (displaySetting.ttsFilterTilde) {
+            processed = processed.normalizeTildeForTts()
+        }
+        if (processed.isNotBlank()) {
+            controller.speak(processed, flushCalled)
+        } else if (flushCalled) {
+            controller.stop()
+        }
     }
 
     override fun stop() {

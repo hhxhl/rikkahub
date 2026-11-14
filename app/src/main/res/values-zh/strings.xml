@@ -713,6 +713,10 @@
   <string name="setting_display_page_tts_only_read_quoted_title">TTS仅朗读引用内容</string>
   <string name="setting_display_page_tts_read_outside_brackets_desc">启用后，TTS将不朗读括号内的内容</string>
   <string name="setting_display_page_tts_read_outside_brackets_title">TTS不朗读括号内的内容</string>
+  <string name="setting_display_page_tts_filter_emoji_title">TTS过滤Emoji</string>
+  <string name="setting_display_page_tts_filter_emoji_desc">朗读时将Emoji替换为空格，聊天内容保持不变</string>
+  <string name="setting_display_page_tts_filter_tilde_title">TTS过滤波浪号</string>
+  <string name="setting_display_page_tts_filter_tilde_desc">数字之间的~替换为“到”，句首句尾去掉，其他位置替换为空格；聊天内容不变</string>
   <string name="setting_display_page_volume_key_scroll_desc">使用音量键翻页，非常适合电子墨水屏</string>
   <string name="setting_display_page_volume_key_scroll_ratio">滚动幅度</string>
   <string name="setting_display_page_volume_key_scroll_title">音量键翻页</string>

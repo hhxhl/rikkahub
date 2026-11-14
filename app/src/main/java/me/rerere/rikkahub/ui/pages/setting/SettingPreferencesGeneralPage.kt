@@ -296,6 +296,18 @@ fun SettingPreferencesGeneralPage(vm: SettingVM = koinViewModel()) {
                         headlineContent = { Text(stringResource(R.string.setting_display_page_tts_read_outside_brackets_title)) },
                     )
                     switchItem(
+                        checked = displaySetting.ttsFilterEmoji,
+                        onCheckedChange = { updateDisplaySetting(displaySetting.copy(ttsFilterEmoji = it)) },
+                        supportingContent = { Text(stringResource(R.string.setting_display_page_tts_filter_emoji_desc)) },
+                        headlineContent = { Text(stringResource(R.string.setting_display_page_tts_filter_emoji_title)) },
+                    )
+                    switchItem(
+                        checked = displaySetting.ttsFilterTilde,
+                        onCheckedChange = { updateDisplaySetting(displaySetting.copy(ttsFilterTilde = it)) },
+                        supportingContent = { Text(stringResource(R.string.setting_display_page_tts_filter_tilde_desc)) },
+                        headlineContent = { Text(stringResource(R.string.setting_display_page_tts_filter_tilde_title)) },
+                    )
+                    switchItem(
                         checked = displaySetting.autoPlayTTSAfterGeneration,
                         onCheckedChange = { updateDisplaySetting(displaySetting.copy(autoPlayTTSAfterGeneration = it)) },
                         supportingContent = { Text(stringResource(R.string.setting_display_page_auto_play_tts_desc)) },

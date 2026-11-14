@@ -679,6 +679,10 @@
   <string name="setting_display_page_tts_only_read_quoted_title">TTS liest nur zitierte Inhalte vor</string>
   <string name="setting_display_page_tts_read_outside_brackets_desc">Wenn aktiviert, liest TTS keine Inhalte in Klammern vor</string>
   <string name="setting_display_page_tts_read_outside_brackets_title">TTS überspringt Inhalte in Klammern</string>
+  <string name="setting_display_page_tts_filter_emoji_title">TTS: Emojis filtern</string>
+  <string name="setting_display_page_tts_filter_emoji_desc">Emojis beim Vorlesen durch Leerzeichen ersetzen, ohne Chatnachrichten zu verändern</string>
+  <string name="setting_display_page_tts_filter_tilde_title">TTS: Tilden filtern</string>
+  <string name="setting_display_page_tts_filter_tilde_desc">~ zwischen Zahlen durch 到 ersetzen, am Satzanfang/-ende entfernen und sonst durch Leerzeichen ersetzen. Chatnachrichten bleiben unverändert</string>
   <string name="setting_display_page_paste_long_text_as_file_desc">Wenn eingefügter Text den Schwellenwert überschreitet, wird er automatisch als Dateianhang gespeichert</string>
   <string name="setting_display_page_paste_long_text_as_file_title">Langtext als Datei einfügen</string>
   <string name="setting_display_page_paste_long_text_threshold_title">Schwellenwert für Textlänge</string>
