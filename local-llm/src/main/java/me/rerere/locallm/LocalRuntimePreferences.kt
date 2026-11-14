@@ -86,6 +86,86 @@ class LocalRuntimePreferences(private val context: Context) {
     @Suppress("MemberVisibilityCanBePrivate")
     val currentSdkVersion: String = LITERTLM_SDK_VERSION
 
+    /** Invalidate SDK-specific accelerator/vision/crash decisions when SDK changes. */
+    suspend fun maybeInvalidateOnSdkUpgrade(runtime: LocalRuntime): Boolean {
+        var invalidated = false
+        context.localRuntimeDataStore.edit { prefs ->
+            val stored = prefs[sdkVersionKey(runtime)]
+            if (stored != currentSdkVersion) {
+                // Clear the three keys whose meaning is SDK-coupled. We DON'T clear
+                // forceCpuKey (it's an explicit user preference, not an inferred one),
+                // maxNumTokensOverrideKey (user-set override), or the installed-models
+                // map (the model files themselves don't care which SDK installed them).
+                prefs.remove(acceleratorKey(runtime))
+                prefs.remove(visionUnavailableKey(runtime))
+                prefs.remove(crashRecoveryKey(runtime))
+                prefs[sdkVersionKey(runtime)] = currentSdkVersion
+                invalidated = true
+            }
+        }
+        return invalidated
+    }
+
+    companion object {
+        /** The LiteRT-LM version this build compiled against, generated from the version
+         *  catalog entry the module actually depends on. Reading it from BuildConfig means
+         *  the dependency and this value cannot drift: bumping the catalog alone is enough
+         *  to invalidate the persisted SDK-coupled decisions on the next launch. */
+        val LITERTLM_SDK_VERSION: String = BuildConfig.LITERTLM_SDK_VERSION
+    }
+
+    private fun decodeInstalledMap(raw: String?): Map<String, String> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        return runCatching {
+            json.decodeFromString(
+                MapSerializer(String.serializer(), String.serializer()),
+                raw,
+            )
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun decodeStringSet(raw: String?): Set<String> {
+        if (raw.isNullOrBlank()) return emptySet()
+        return runCatching {
+            json.decodeFromString(SetSerializer(String.serializer()), raw)
+        }.getOrDefault(emptySet())
+    }
+
+    fun acceleratorFlow(runtime: LocalRuntime): Flow<String?> =
+        context.localRuntimeDataStore.data.map { it[acceleratorKey(runtime)] }
+
+    suspend fun setAccelerator(runtime: LocalRuntime, accel: String) {
+        context.localRuntimeDataStore.edit { it[acceleratorKey(runtime)] = accel }
+    }
+
+    suspend fun clearAccelerator(runtime: LocalRuntime) {
+        context.localRuntimeDataStore.edit { it.remove(acceleratorKey(runtime)) }
+    }
+
+    /** True means the probe ALWAYS returns "CPU" regardless of device capabilities;
+     *  false lets the probe pick GPU/NNAPI/QNN. When the user has set no preference,
+     *  falls back to the device-dependent [defaultForceCpu]. */
+    fun forceCpuFlow(runtime: LocalRuntime): Flow<Boolean> =
+        context.localRuntimeDataStore.data.map { it[forceCpuKey(runtime)] ?: defaultForceCpu }
+
+    /** Per-runtime override for `EngineConfig.maxNumTokens`. Null (default) means use
+     *  the per-model curated value from `LiteRtModelDefaults`. Setting it lets users
+     *  unlock the headroom on capable models (e.g. Gemma 4 E2B's 32k context where
+     *  Gallery's default is 4000). The model's underlying KV cache size is still a
+     *  hard ceiling — Qwen's `ekv4096` files cannot exceed 4096 regardless of this. */
+    fun maxNumTokensOverrideFlow(runtime: LocalRuntime): Flow<Int?> =
+        context.localRuntimeDataStore.data.map { it[maxNumTokensOverrideKey(runtime)] }
+
+    suspend fun maxNumTokensOverride(runtime: LocalRuntime): Int? =
+        maxNumTokensOverrideFlow(runtime).first()
+
+    suspend fun setMaxNumTokensOverride(runtime: LocalRuntime, value: Int?) {
+        context.localRuntimeDataStore.edit { prefs ->
+            if (value == null) prefs.remove(maxNumTokensOverrideKey(runtime))
+            else prefs[maxNumTokensOverrideKey(runtime)] = value
+        }
+    }
+
     /** Stored per-runtime override for max input + output tokens. */
     private fun maxNumTokensOverrideKey(runtime: LocalRuntime) =
         androidx.datastore.preferences.core.intPreferencesKey("max_tokens_${runtime.displayName}")
