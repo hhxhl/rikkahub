@@ -197,22 +197,21 @@ class LiteRtProvider(
         // GPU-broken devices (Adreno 7xx + restrictive OEM ROMs, Google Tensor) by
         // making the bigger Gemma-4 models completely unreachable when a text-only
         // load would have worked.
-        // The model's real context ceiling, most trustworthy source first:
-        //   1. what the file declares about itself (LlmMetadataProto field 5),
-        //   2. the `ekvNNNN` marker its packager put in the filename,
-        //   3. our curated table.
+        // The model's KV cache ceiling, most specific source first:
+        //   1. explicit exported `ekvNNNN` cache marker (if present),
+        //   2. the metadata context length (conservative when export size is unknown),
+        //   3. the curated table. A metadata default can be smaller than exported KV.
         // This is NOT advisory. `EngineConfig.maxNumTokens` is taken on trust by the
         // engine, so a value above the KV cache the file was built for makes prefill run
         // off the end of that cache and fault inside the native executor: SIGSEGV on the
         // execution thread, nothing catchable, process gone. The comment that used to sit
         // here claimed "the underlying KV cache size still caps it" — it does not, and
         // that assumption is what let a 32000-token setting reach a 2048-token model.
-        val contextCeiling = LiteRtModelFile.readDeclaredMaxTokens(java.io.File(modelPath))
-            ?: LiteRtModelDefaults.contextCeilingFromFileName(params.model.modelId)
-            ?: config.maxContextLength
+        val contextCeiling = LiteRtModelFile.resolveContextCeiling(
+            java.io.File(modelPath), params.model.modelId, config,
+        )
 
-        // User-set max-context override. Lets capable models (Gemma 4 E2B = 32k) use more
-        // than Gallery's curated default, but never past the ceiling above.
+        // User-set max-context override: never beyond the identified file cache ceiling.
         val maxNumTokensOverride = prefs.maxNumTokensOverride(LocalRuntime.LiteRT)
         val requestedMaxNumTokens = maxNumTokensOverride ?: config.maxTokens
         val effectiveMaxNumTokens = engineContextTokens(requestedMaxNumTokens, contextCeiling)
@@ -267,24 +266,23 @@ class LiteRtProvider(
         // No system-prompt tool catalogue is needed, and none is added: a duplicate
         // listing would only compete with the template's own rendering for context.
         //
-        // Declarations are budgeted like every other part of the prompt, against the context
-        // the ENGINE was configured with just above. Budgeting against the file's ceiling
-        // instead is what let a prompt built for 32768 tokens reach an engine holding 4096:
-        // the catalog deliberately allocates less than the file can hold, so the two numbers
-        // differ by 8x on the Gemma 4 entries. A tool that does not fit is skipped rather
-        // than truncated: half a JSON schema would render a malformed declaration.
+        // Declarations are budgeted in UTF-8 bytes against the actual Engine allocation,
+        // leaving room for dialogue, a response, and the template. A tool that cannot fit
+        // is skipped intact rather than truncating its JSON schema.
         val contextTokens = effectiveMaxNumTokens
-        val toolCharBudget = toolDeclarationCharBudget(contextTokens)
-        var toolCharsUsed = 0
+        val combinedSystem = trimmedSystemTexts.trim()
+        val systemBytes = combinedSystem.toByteArray(Charsets.UTF_8).size
+        val toolByteBudget = toolDeclarationByteBudget(contextTokens, systemBytes)
+        var toolBytesUsed = 0
         val droppedTools = mutableListOf<String>()
         val declarations = params.tools.mapNotNull { tool ->
             val declaration = LiteRtToolDeclaration(tool)
-            val cost = declaration.declarationJson.length
-            if (toolCharsUsed + cost > toolCharBudget) {
+            val cost = declaration.declarationJson.toByteArray(Charsets.UTF_8).size + TOOL_OVERHEAD_BYTES
+            if (toolBytesUsed + cost > toolByteBudget) {
                 droppedTools += tool.name
                 null
             } else {
-                toolCharsUsed += cost
+                toolBytesUsed += cost
                 declaration
             }
         }
@@ -293,7 +291,7 @@ class LiteRtProvider(
             Log.i(
                 TAG,
                 "declared ${nativeTools.size}/${params.tools.size} tool(s) natively, " +
-                    "$toolCharsUsed/$toolCharBudget chars (context ${contextTokens}t)",
+                    "$toolBytesUsed/$toolByteBudget bytes (context ${contextTokens}t)",
             )
         }
         // Never drop tools silently: an assistant with a large enabled set on a small model
@@ -306,8 +304,6 @@ class LiteRtProvider(
                     droppedTools.joinToString(",").take(300),
             )
         }
-
-        val combinedSystem = trimmedSystemTexts.trim()
 
         // ---- Conversation history → turn list + cold-path blob ----
         //
@@ -323,29 +319,36 @@ class LiteRtProvider(
         // TOOL-role messages are dropped here: their content is already represented inline
         // in the immediately-preceding ASSISTANT message's Tool part output.
         //
-        // Trimming: drop the oldest turns one at a time until the cold render fits under
-        // HISTORY_CHAR_BUDGET. A trimmed list is no longer a forward-only extension of what
-        // the Conversation already processed, so the runtime correctly falls back to a cold
-        // rebuild for that turn — exactly the behaviour we want when history is reshaped.
+        // Trimming: adapt to the configured Engine context, actual tool declarations,
+        // system bytes and reserved response capacity. Drop oldest complete turns; never
+        // silently truncate the newest user's request. A reshaped history goes cold.
         var trimmed = messages.filter {
             it.role != MessageRole.SYSTEM && it.role != MessageRole.TOOL
         }
         var coldBlob = renderColdBlob(trimmed)
-        while (coldBlob.length > HISTORY_CHAR_BUDGET && trimmed.size > 1) {
+        val historyBudget = historyByteBudget(contextTokens, systemBytes, toolBytesUsed)
+        while (coldBlob.toByteArray(Charsets.UTF_8).size > historyBudget && trimmed.size > 1) {
             trimmed = trimmed.drop(1)
             coldBlob = renderColdBlob(trimmed)
         }
+        val historyBytes = coldBlob.toByteArray(Charsets.UTF_8).size
+        if (historyBytes > historyBudget) {
+            throw IllegalArgumentException(
+                "Latest message exceeds the safe local context budget ($historyBytes > " +
+                    "$historyBudget UTF-8 bytes for ${contextTokens} tokens). " +
+                    "Shorten the message, reduce enabled tools, or use a larger context model."
+            )
+        }
         val turns = trimmed.map { it.toTurn() }
 
-        // Every piece of the prefill, so an overflow is visible in a bug report without a
-        // rebuild. The engine has no bounds check we can rely on here: a prompt past its
-        // token budget faults inside the native executor rather than returning an error.
-        val prefillChars = combinedSystem.length + toolCharsUsed + coldBlob.length
+        // Log actual prompt byte usage. The heuristic budget is intentionally conservative:
+        // LiteRT-LM does not expose an exact prompt-token counter through this API.
+        val prefillBytes = systemBytes + toolBytesUsed + historyBytes
         Log.i(
             TAG,
-            "prefill budget: system=${combinedSystem.length} tools=$toolCharsUsed " +
-                "history=${coldBlob.length} total=${prefillChars}c " +
-                "(~${prefillChars / CHARS_PER_TOKEN}t of ${contextTokens}t)",
+            "prefill budget: system=${systemBytes}B tools=${toolBytesUsed}B " +
+                "history=${historyBytes}B total=${prefillBytes}B " +
+                "(input byte cap=${promptByteBudget(contextTokens)}B, engine=${contextTokens}t)",
         )
 
         // Check the persisted vision-unavailable flag. If a prior load fell back to
@@ -364,9 +367,11 @@ class LiteRtProvider(
             !visionPersistentlyUnavailable
 
         // ---- Engine load with full per-model + per-call config ----
+        val requestId = java.util.UUID.randomUUID().toString()
         val outcome = try {
             runtime.ensureLoaded(
                 modelPath = modelPath,
+                requestId = requestId,
                 preferredAccel = cachedAccel,
                 forceCpu = forceCpu,
                 maxNumTokens = effectiveMaxNumTokens,
@@ -382,12 +387,13 @@ class LiteRtProvider(
                 visionAccelerator = config.visionAccelerator ?: "gpu",
                 systemInstructionText = combinedSystem.ifBlank { null },
                 tools = nativeTools,
+                toolDeclarations = declarations.map { it.declarationJson },
                 // Constrained decoding ON when this turn carries tools — matches Gallery's
                 // tool-task behaviour. The SDK projects the model's output into the @Tool
                 // call grammar so Gemma actually invokes runTool(...) via the bridge
                 // instead of producing free-form "I can't do that" text. OFF for plain
                 // chat turns to avoid biasing normal language.
-                constrainedDecoding = params.tools.isNotEmpty(),
+                constrainedDecoding = nativeTools.isNotEmpty(),
                 topK = config.topK,
                 topP = config.topP,
                 temperature = config.temperature,
@@ -397,6 +403,7 @@ class LiteRtProvider(
         } catch (t: Throwable) {
             throw translateSdkError(t, effectiveMaxNumTokens)
         }
+        try {
         val resolvedAccel = outcome.accelerator
         // Persist whatever the runtime actually used. Without this, the in-runtime
         // GPU -> CPU fallback only sticks for the current process: every cold start
@@ -498,6 +505,7 @@ class LiteRtProvider(
         run {
             try {
                 runtime.streamTurns(
+                    requestId = requestId,
                     history = turns,
                     coldBlob = coldBlob,
                     images = turnImages,
@@ -587,6 +595,12 @@ class LiteRtProvider(
         // agent loop to do that; reporting "stop" would end the turn with the model's
         // request silently dropped.
         emit(StreamChunk.Finish(finishReason = if (toolCallCount > 0) "tool_calls" else "stop"))
+        } finally {
+            // Cancellation must also release the ensureLoaded→streamTurns reservation.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                runtime.releasePendingStream(modelPath, requestId)
+            }
+        }
     }
 
     /**
@@ -762,29 +776,32 @@ class LiteRtProvider(
          *  docs that small models can't usefully consume). 500 chars ≈ 125 tokens. */
         private const val SYSTEM_MESSAGE_CHAR_BUDGET = 500
 
-        /** Hard char-cap for the rendered ChatML history. ~3000 chars ≈ 750 tokens. */
-        private const val HISTORY_CHAR_BUDGET = 3000
+        /** Per-tool allowance for chat-template framing that is not present in JSON. */
+        private const val TOOL_OVERHEAD_BYTES = 48
 
-        /** Rough chars-per-token used to turn a model's token context into a char budget. */
-        private const val CHARS_PER_TOKEN = 4
+        /** Conservative byte budget: reserve 25% (at least 256t) for output and another
+         *  96t for chat-template/native framing. UTF-8 bytes / 2 approximates an upper
+         *  token count for multilingual text more safely than 4 characters per token.
+         *  This is still a heuristic, not a replacement for SDK tokenization. */
+        internal fun promptByteBudget(contextTokens: Int): Int {
+            val response = maxOf(256, contextTokens / 4)
+            val available = (contextTokens - response - 96).coerceAtLeast(0)
+            return (available.toLong() * 2).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        }
 
-        /**
-         * Char budget for the joined native tool declarations, scaled to the model's
-         * context the way the system prompt and history already are.
-         *
-         * Declarations are prompt text: the chat template renders every one of them ahead
-         * of the conversation. Leaving them uncapped let an assistant with a large enabled
-         * tool set push tens of thousands of characters of JSON schema into a model whose
-         * whole context is a few thousand tokens, which is far more than the 3.5k chars
-         * system + history are allowed between them.
-         *
-         * Half the context is reserved for the response; the system prompt and history
-         * budgets come off the input half first, and the declarations get what is left.
-         */
-        internal fun toolDeclarationCharBudget(contextTokens: Int): Int =
-            (contextTokens * CHARS_PER_TOKEN / 2) -
-                SYSTEM_MESSAGE_CHAR_BUDGET -
-                HISTORY_CHAR_BUDGET
+        /** Keep at least half of the remaining input bytes for actual dialogue;
+         *  tiny <= 1280-token models should not get expensive native tool schemas. */
+        internal fun toolDeclarationByteBudget(contextTokens: Int, systemBytes: Int): Int {
+            if (contextTokens <= 1280) return 0
+            val remaining = (promptByteBudget(contextTokens) - systemBytes).coerceAtLeast(0)
+            return remaining / 2
+        }
+
+        internal fun historyByteBudget(
+            contextTokens: Int,
+            systemBytes: Int,
+            toolBytes: Int,
+        ): Int = (promptByteBudget(contextTokens) - systemBytes - toolBytes).coerceAtLeast(0)
 
         /**
          * The context the engine is actually configured with: what was asked for, clamped to

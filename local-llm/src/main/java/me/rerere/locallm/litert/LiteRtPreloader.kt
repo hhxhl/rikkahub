@@ -29,7 +29,14 @@ class LiteRtPreloader(
                 if (requested != selectedModel) continue
                 if (requested == null) continue
                 try {
-                    preload(requested)
+                    // If an earlier request is between ensureLoaded and streamTurns,
+                    // retry rather than evicting its Engine. Active inference itself is
+                    // serialized by the runtime mutex.
+                    for (attempt in 0 until 30) {
+                        if (requested != selectedModel) break
+                        if (preload(requested) != LiteRtRuntime.PreloadResult.DEFERRED) break
+                        delay(1000)
+                    }
                     // The user may have switched to another provider while loading.
                     if (requested != selectedModel) {
                         val oldPath = prefs.installedModels(LocalRuntime.LiteRT)[requested]
@@ -49,18 +56,19 @@ class LiteRtPreloader(
         requests.trySend(modelFile)
     }
 
-    private suspend fun preload(modelFile: String) {
-        val path = prefs.installedModels(LocalRuntime.LiteRT)[modelFile] ?: return
-        if (!File(path).isFile) return
+    private suspend fun preload(modelFile: String): LiteRtRuntime.PreloadResult {
+        val path = prefs.installedModels(LocalRuntime.LiteRT)[modelFile]
+            ?: return LiteRtRuntime.PreloadResult.FAILED
+        if (!File(path).isFile) return LiteRtRuntime.PreloadResult.FAILED
         val config = LiteRtModelDefaults.forModelFile(modelFile)
-        val contextCeiling = LiteRtModelFile.readDeclaredMaxTokens(File(path))
-            ?: LiteRtModelDefaults.contextCeilingFromFileName(modelFile)
-            ?: config.maxContextLength
+        val contextCeiling = LiteRtModelFile.resolveContextCeiling(
+            File(path), modelFile, config,
+        )
         val requestedContext = prefs.maxNumTokensOverride(LocalRuntime.LiteRT) ?: config.maxTokens
         val tokens = LiteRtProvider.engineContextTokens(requestedContext, contextCeiling)
         val imageSupport = config.supportsImage && config.visionAccelerator != null &&
             !prefs.isVisionUnavailable(LocalRuntime.LiteRT, modelFile)
-        runtime.preloadEngine(
+        return runtime.preloadEngine(
             modelPath = path,
             preferredAccel = prefs.acceleratorFlow(LocalRuntime.LiteRT).first(),
             forceCpu = prefs.forceCpu(LocalRuntime.LiteRT),

@@ -345,6 +345,8 @@ class LiteRtRuntime(private val context: Context) {
         val topK: Int,
         val topP: Double,
         val temperature: Double,
+        /** Exact, ordered declaration JSON strings; changes require a fresh Conversation. */
+        val toolDeclarations: List<String>,
     )
 
     /** Everything needed to (re)build a [Conversation] for the cold path without re-deriving
@@ -374,6 +376,12 @@ class LiteRtRuntime(private val context: Context) {
          *  order — the caller-supplied history turns plus one synthetic assistant turn for
          *  the response generated last. Cleared whenever the Conversation is recreated. */
         val processed: MutableList<String> = mutableListOf(),
+        /** True only for a newly created Conversation that has never received tokens.
+         *  An error/cancel makes this false even if [processed] is empty. */
+        var pristineConversation: Boolean = true,
+        /** Set after ensureLoaded until streamTurns begins: protects that gap from a
+         *  model-selection preload closing the Engine before its actual request starts. */
+        var pendingStreamOwner: String? = null,
         /** Monotonic timestamp of the last [streamTurns] invocation. The idle-teardown
          *  watchdog ([armIdleTeardown]) uses this to decide whether to close the engine. */
         @Volatile var lastUseAtMs: Long = android.os.SystemClock.elapsedRealtime(),
@@ -386,6 +394,10 @@ class LiteRtRuntime(private val context: Context) {
         val speculativeDecodingEngaged: Boolean,
         @Volatile var lastUseAtMs: Long = android.os.SystemClock.elapsedRealtime(),
     )
+
+    /** Result of best-effort Engine preload; Deferred means an existing request owns
+     *  the currently loaded Engine and the preloader should retry after it finishes. */
+    enum class PreloadResult { READY, DEFERRED, FAILED }
 
     /**
      * Pre-initialize only the model Engine. A real request creates the Conversation with
@@ -402,7 +414,7 @@ class LiteRtRuntime(private val context: Context) {
         supportImage: Boolean = false,
         supportAudio: Boolean = false,
         visionAccelerator: String = "gpu",
-    ) = mutex.withLock {
+    ): PreloadResult = mutex.withLock {
         val requestedAccel = if (forceCpu) "CPU"
             else sessionFallbackAccelerator ?: preferredAccel ?: AcceleratorProbe.probeLiteRt(context)
         val accel = if (crashedPreviously(modelPath, requestedAccel)) {
@@ -420,15 +432,25 @@ class LiteRtRuntime(private val context: Context) {
             visionAccelerator = visionAccelerator,
         )
         val existing = loaded
-        if (existing?.engineKey == key) return@withLock
-        // Avoid swapping a live Engine in the small gap between ensureLoaded and
-        // streamTurns. The first real request can perform the usual model switch.
-        if (existing != null) return@withLock
+        if (existing?.engineKey == key) return@withLock PreloadResult.READY
+        // streamTurns holds this same mutex for the entire generation. Protect also
+        // the gap between ensureLoaded and streamTurns (which are separate calls).
+        if (existing != null && shouldDeferModelSwitch(existing.pendingStreamOwner != null)) {
+            return@withLock PreloadResult.DEFERRED
+        }
+        // User selected another local model while A is idle. Close A before loading B,
+        // rather than keeping two large models resident on an 8 GB phone.
+        if (existing != null) {
+            try { existing.conversation.close() } catch (_: Throwable) {}
+            try { existing.engine.close() } catch (_: Throwable) {}
+            loaded = null
+            lastTelemetry = null
+        }
         preloaded?.let { staged ->
             if (staged.engineKey == key) {
                 staged.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                 armIdleTeardown()
-                return@withLock
+                return@withLock PreloadResult.READY
             }
         }
         // Replace only an unused staged Engine; never interrupt a live Conversation.
@@ -468,12 +490,21 @@ class LiteRtRuntime(private val context: Context) {
                         "${candidate.maxNumTokens} tokens (conversation deferred)",
                 )
                 armIdleTeardown()
-                return@withLock
+                return@withLock PreloadResult.READY
             } catch (t: Throwable) {
                 android.util.Log.w("LiteRtRuntime", "preloadEngine: ${candidate.accelerator} failed", t)
             }
         }
         // Do not prevent the normal generation path from retrying and reporting errors.
+        PreloadResult.FAILED
+    }
+
+    /** Called by the provider in finally. If argument preparation or media conversion
+     *  failed before streamTurns started, do not leave the old Engine permanently reserved. */
+    suspend fun releasePendingStream(modelPath: String, requestId: String) = mutex.withLock {
+        loaded?.takeIf {
+            it.engineKey.modelPath == modelPath && it.pendingStreamOwner == requestId
+        }?.pendingStreamOwner = null
     }
 
     /** Release only an unused staged Engine, without touching an active Conversation. */
@@ -541,6 +572,7 @@ class LiteRtRuntime(private val context: Context) {
     @OptIn(ExperimentalApi::class) // ExperimentalFlags.* + Capabilities.hasSpeculativeDecodingSupport
     suspend fun ensureLoaded(
         modelPath: String,
+        requestId: String,
         preferredAccel: String? = null,
         forceCpu: Boolean = false,
         maxNumTokens: Int = 4096,
@@ -552,6 +584,7 @@ class LiteRtRuntime(private val context: Context) {
         visionAccelerator: String = "gpu",
         systemInstructionText: String? = null,
         tools: List<ToolProvider> = emptyList(),
+        toolDeclarations: List<String> = emptyList(),
         constrainedDecoding: Boolean = false,
         topK: Int = 64,
         topP: Double = 0.95,
@@ -602,6 +635,7 @@ class LiteRtRuntime(private val context: Context) {
             topK = topK,
             topP = topP,
             temperature = temperature,
+            toolDeclarations = toolDeclarations.toList(),
         )
         val desiredConversationSpec = ConversationSpec(
             systemInstruction = systemInstruction,
@@ -617,6 +651,7 @@ class LiteRtRuntime(private val context: Context) {
             if (current.conversationKey == desiredConversationKey) {
                 // Full reuse — Engine AND Conversation kept. The KV cache (and therefore
                 // [processed]) is left intact so the next streamTurns can warm-continue.
+                current.pendingStreamOwner = requestId
                 return@withLock LoadOutcome(
                     accelerator = accel,
                     visionEnabled = current.engineKey.supportImage,
@@ -636,6 +671,8 @@ class LiteRtRuntime(private val context: Context) {
             current.conversationKey = desiredConversationKey
             current.conversationSpec = desiredConversationSpec
             current.processed.clear()
+            current.pristineConversation = true
+            current.pendingStreamOwner = requestId
             return@withLock LoadOutcome(
                 accelerator = accel,
                 visionEnabled = current.engineKey.supportImage,
@@ -669,6 +706,7 @@ class LiteRtRuntime(private val context: Context) {
                         conversation = conv,
                         fileSupportsSpeculativeDecoding = staged.fileSupportsSpeculativeDecoding,
                         speculativeDecodingEngaged = staged.speculativeDecodingEngaged,
+                        pendingStreamOwner = requestId,
                     )
                     android.util.Log.i("LiteRtRuntime", "ensureLoaded: reused preloaded Engine")
                     armIdleTeardown()
@@ -821,6 +859,7 @@ class LiteRtRuntime(private val context: Context) {
             conversation = loadResult.conversation,
             fileSupportsSpeculativeDecoding = supportsSpeculativeDecoding,
             speculativeDecodingEngaged = effectiveSpeculativeDecoding,
+            pendingStreamOwner = requestId,
         )
         android.util.Log.i(
             "LiteRtRuntime",
@@ -1003,6 +1042,7 @@ class LiteRtRuntime(private val context: Context) {
             backend = acceleratorToBackend(instance.engineKey.accelerator),
             spec = instance.conversationSpec,
         )
+        instance.pristineConversation = true
     }
 
     /**
@@ -1026,6 +1066,7 @@ class LiteRtRuntime(private val context: Context) {
      * inference so two concurrent callers queue up rather than racing the Conversation.
      */
     fun streamTurns(
+        requestId: String,
         history: List<Turn>,
         coldBlob: String,
         images: List<Bitmap> = emptyList(),
@@ -1064,6 +1105,12 @@ class LiteRtRuntime(private val context: Context) {
 
             val hasMedia = images.isNotEmpty() || audioClips.isNotEmpty()
             val historySignatures = history.map { it.signature }
+            // The provider has now entered its generation call, so a pending-request
+            // reservation is no longer needed; the mutex protects the active stream.
+            check(instance.pendingStreamOwner == requestId) {
+                "LiteRT request was superseded before generation started; retry this turn"
+            }
+            instance.pendingStreamOwner = null
             val plan = planTurns(instance.processed, historySignatures, hasMedia)
 
             val inputText: String = when (plan) {
@@ -1072,7 +1119,15 @@ class LiteRtRuntime(private val context: Context) {
                     // ensureLoaded may have kept a warm Conversation that this turn cannot
                     // reuse (a /new, an edit, a regeneration, a tool round-trip, or media).
                     // Recreate it to clear the KV cache, then send the full history.
-                    recreateConversationLocked(instance)
+                    // The first request already owns a fresh Conversation from ensureLoaded.
+                    // Rebuilding it immediately wastes native Conversation/KV allocation.
+                    // An interrupted/error Conversation is NOT pristine and must be reset.
+                    if (shouldRecreateForCold(instance.pristineConversation)) {
+                        android.util.Log.d("LiteRtRuntime", "streamTurns: Cold rebuilt Conversation")
+                        recreateConversationLocked(instance)
+                    } else {
+                        android.util.Log.d("LiteRtRuntime", "streamTurns: Cold reused pristine Conversation")
+                    }
                     instance.processed.clear()
                     coldBlob
                 }
@@ -1104,6 +1159,9 @@ class LiteRtRuntime(private val context: Context) {
             // How many of the message's tool calls have already been forwarded. The SDK
             // re-delivers the full list on each callback, so forward only the new tail.
             var emittedToolCalls = 0
+            // From this point onward native state may have changed, even if a send
+            // throws or the user cancels before the first token arrives.
+            instance.pristineConversation = false
             conv.sendMessageAsync(
                 Contents.of(contentList),
                 object : MessageCallback {
@@ -1249,6 +1307,12 @@ class LiteRtRuntime(private val context: Context) {
          * Any "no" answer is [TurnPlan.Cold], which is always correct — the warm path is
          * purely an optimisation.
          */
+        internal fun shouldRecreateForCold(pristineConversation: Boolean): Boolean =
+            !pristineConversation
+
+        internal fun shouldDeferModelSwitch(pendingStream: Boolean): Boolean =
+            pendingStream
+
         internal fun planTurns(
             processed: List<String>,
             historySignatures: List<String>,

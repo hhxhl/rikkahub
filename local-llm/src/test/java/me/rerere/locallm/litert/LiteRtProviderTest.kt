@@ -90,48 +90,34 @@ class LiteRtProviderTest {
  */
 class LiteRtToolDeclarationBudgetTest {
 
-    private fun budget(contextTokens: Int) =
-        LiteRtProvider.toolDeclarationCharBudget(contextTokens)
-
     @Test
-    fun `budget leaves room for system prompt and history`() {
-        // 4096t * 4 chars / 2 = 8192 input chars, minus the 500 + 3000 already committed.
-        assertEquals(4692, budget(4096))
+    fun `input budget grows with actual Engine context`() {
+        assertTrue(LiteRtProvider.promptByteBudget(8192) > LiteRtProvider.promptByteBudget(4096))
+        assertTrue(LiteRtProvider.promptByteBudget(16384) > LiteRtProvider.promptByteBudget(8192))
     }
 
     @Test
-    fun `budget scales with the model's context`() {
-        assertTrue(
-            "a 32k model must afford far more declarations than a 4k one",
-            budget(32768) > budget(4096) * 10,
-        )
+    fun `small 1280-token models reserve space for dialogue rather than tool schemas`() {
+        assertEquals(0, LiteRtProvider.toolDeclarationByteBudget(1280, 500))
+        assertTrue(LiteRtProvider.historyByteBudget(1280, 500, 0) > 0)
     }
 
     @Test
-    fun `budget goes non-positive for a context too small to hold any tool`() {
-        // 1280t (qwen3 ekv1280) -> 2560 - 3500 < 0, so no tool is declared at all rather
-        // than one being forced in over budget.
-        assertTrue("tiny context yields no tool room", budget(1280) <= 0)
+    fun `tool and history budgets stay within current Engine allocation`() {
+        val budget = LiteRtProvider.promptByteBudget(8192)
+        val system = 780
+        val tool = LiteRtProvider.toolDeclarationByteBudget(8192, system)
+        val history = LiteRtProvider.historyByteBudget(8192, system, tool)
+        assertEquals(budget, system + tool + history)
+        assertTrue(history > 3000)
     }
 
     @Test
-    fun `declarations are taken until the budget is spent and the rest reported`() {
-        val costs = listOf(100, 100, 100, 100)
-        val charBudget = 250
-        var used = 0
-        val dropped = mutableListOf<Int>()
-        val kept = costs.filterIndexed { index, cost ->
-            if (used + cost > charBudget) {
-                dropped += index
-                false
-            } else {
-                used += cost
-                true
-            }
-        }
-        assertEquals("only whole declarations that fit are kept", listOf(100, 100), kept)
-        assertEquals(200, used)
-        assertEquals("the overflow is reported, not silently swallowed", listOf(2, 3), dropped)
+    fun `enabled tools reduce allowed history without a fixed 3000-character cap`() {
+        val freeHistory = LiteRtProvider.historyByteBudget(16384, 500, 0)
+        val withTools = LiteRtProvider.historyByteBudget(16384, 500, 4000)
+        assertTrue(freeHistory > 3000)
+        assertEquals(freeHistory - 4000, withTools)
     }
 }
 
@@ -167,10 +153,10 @@ class LiteRtEngineContextTokensTest {
         // The regression this guards: budget(ceiling) was handed to an engine sized at the
         // allocation, so the committed prefill could run past what the engine can hold.
         val engine = LiteRtProvider.engineContextTokens(4096, 32768)
-        val committedChars = 500 + 3000 + LiteRtProvider.toolDeclarationCharBudget(engine)
-        assertTrue(
-            "prefill budget ${committedChars}c must fit the engine's ${engine}t",
-            committedChars <= engine * 4,
-        )
+        val systemBytes = 500
+        val toolBytes = LiteRtProvider.toolDeclarationByteBudget(engine, systemBytes)
+        val historyBytes = LiteRtProvider.historyByteBudget(engine, systemBytes, toolBytes)
+        assertEquals(LiteRtProvider.promptByteBudget(engine),
+            systemBytes + toolBytes + historyBytes)
     }
 }

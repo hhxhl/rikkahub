@@ -133,6 +133,22 @@ class LiteRtRuntimeTest {
         assertFalse(turnSignature(ROLE_USER, "a") == turnSignature(ROLE_USER, "b"))
     }
 
+    @Test
+    fun `first Cold turn can keep a pristine Conversation`() {
+        assertFalse(LiteRtRuntime.shouldRecreateForCold(pristineConversation = true))
+    }
+
+    @Test
+    fun `cancelled or previously used Conversation must be rebuilt on Cold`() {
+        assertTrue(LiteRtRuntime.shouldRecreateForCold(pristineConversation = false))
+    }
+
+    @Test
+    fun `a model switch must wait when ensureLoaded has not started streaming`() {
+        assertTrue(LiteRtRuntime.shouldDeferModelSwitch(pendingStream = true))
+        assertFalse(LiteRtRuntime.shouldDeferModelSwitch(pendingStream = false))
+    }
+
     // ---- isVisionExecutorError -----------------------------------------------------
 
     @Test

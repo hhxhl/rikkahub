@@ -87,6 +87,24 @@ class LiteRtModelFileTest {
     }
 
     @Test
+    fun `explicit ekv export overrides a smaller metadata default`() {
+        val metadata = varintField(5, 4096) + bytesField(7, template)
+        val sample = buildFile(metadata)
+        val named = File(tempFolder.root, "demo_q4_ekv32768.litertlm")
+        sample.copyTo(named)
+        val config = LiteRtModelDefaults.forModelFile(named.name)
+        assertEquals(32768, LiteRtModelFile.resolveContextCeiling(named, named.name, config))
+    }
+
+    @Test
+    fun `without export marker metadata remains the conservative cap`() {
+        val metadata = varintField(5, 4096) + bytesField(7, template)
+        val sample = buildFile(metadata)
+        val config = LiteRtModelDefaults.forModelFile("unknown-model.litertlm")
+        assertEquals(4096, LiteRtModelFile.resolveContextCeiling(sample, "unknown-model.litertlm", config))
+    }
+
+    @Test
     fun `returns null when the file declares no ceiling`() {
         // The Gemma 4 shape: metadata present and valid, field 5 simply absent. The caller
         // must fall back to the ekvNNNN filename marker rather than invent a number.

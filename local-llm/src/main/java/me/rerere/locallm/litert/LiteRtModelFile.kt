@@ -98,6 +98,30 @@ internal object LiteRtModelFile {
     }.getOrNull()
 
     /**
+     * Resolve a context limit without confusing an exported KV cache length (ekvNNNN)
+     * with metadata field 5, which may be only the SDK's default context allocation.
+     *
+     * An explicit ekv marker is the exporter's cache-size declaration and therefore takes
+     * precedence when present. Without it we stay conservative: metadata, then catalog.
+     * Arbitrary overrides still cannot exceed this returned ceiling. A filename marker
+     * is not cryptographic proof, so a mismatched/misnamed third-party file can still fail;
+     * do not infer a larger KV cache solely from the base model's context window.
+     */
+    fun resolveContextCeiling(file: File, modelFile: String, config: LiteRtModelConfig): Int? {
+        val packaged = LiteRtModelDefaults.contextCeilingFromFileName(file.name)
+            ?: LiteRtModelDefaults.contextCeilingFromFileName(modelFile)
+        val metadataDefault = readDeclaredMaxTokens(file)
+        if (packaged != null) {
+            if (metadataDefault != null && metadataDefault != packaged) {
+                Log.i(TAG, "exported KV cache=$packaged, metadata default=$metadataDefault " +
+                    "for ${file.name}; using explicit ekv cache ceiling")
+            }
+            return packaged
+        }
+        return metadataDefault ?: config.maxContextLength
+    }
+
+    /**
      * Decode the top-level protobuf fields in `bytes[from, to)`. Returns null if the range
      * is not well-formed protobuf, which is how a wrongly-guessed span gets rejected.
      * Varints come back as [Long], length-delimited fields as [ByteArray]; only the first
