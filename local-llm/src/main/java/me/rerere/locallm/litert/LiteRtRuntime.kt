@@ -180,6 +180,9 @@ class LiteRtRuntime(private val context: Context) {
     private val mutex = Mutex()
     private var loaded: LoadedModel? = null
 
+    /** Engine-only prefetch; no Conversation/KV state until a real request arrives. */
+    private var preloaded: PreloadedEngine? = null
+
     /**
      * In-session fallback accelerator. If the preferred/probed accelerator failed and we
      * successfully fell back to CPU, remember that result for the rest of this session so
@@ -291,21 +294,24 @@ class LiteRtRuntime(private val context: Context) {
     private fun armIdleTeardown() {
         idleTeardownJob?.cancel()
         val delay = idleTeardownDelayMs
-        if (delay <= 0L || loaded == null) return
+        if (delay <= 0L || (loaded == null && preloaded == null)) return
         idleTeardownJob = idleScope.launch {
             kotlinx.coroutines.delay(delay)
             mutex.withLock {
-                val current = loaded ?: return@withLock
-                val sinceLastUseMs = android.os.SystemClock.elapsedRealtime() - current.lastUseAtMs
-                if (sinceLastUseMs >= delay) {
-                    android.util.Log.i(
-                        "LiteRtRuntime",
-                        "armIdleTeardown: idle ${sinceLastUseMs}ms >= ${delay}ms; closing engine",
-                    )
-                    try { current.conversation.close() } catch (_: Throwable) {}
-                    try { current.engine.close() } catch (_: Throwable) {}
-                    loaded = null
-                    lastTelemetry = null
+                val now = android.os.SystemClock.elapsedRealtime()
+                loaded?.let { current ->
+                    if (now - current.lastUseAtMs >= delay) {
+                        try { current.conversation.close() } catch (_: Throwable) {}
+                        try { current.engine.close() } catch (_: Throwable) {}
+                        loaded = null
+                        lastTelemetry = null
+                    }
+                }
+                preloaded?.let { staged ->
+                    if (now - staged.lastUseAtMs >= delay) {
+                        try { staged.engine.close() } catch (_: Throwable) {}
+                        preloaded = null
+                    }
                 }
             }
         }
@@ -372,6 +378,112 @@ class LiteRtRuntime(private val context: Context) {
          *  watchdog ([armIdleTeardown]) uses this to decide whether to close the engine. */
         @Volatile var lastUseAtMs: Long = android.os.SystemClock.elapsedRealtime(),
     )
+
+    private class PreloadedEngine(
+        val engineKey: EngineKey,
+        val engine: Engine,
+        val fileSupportsSpeculativeDecoding: Boolean,
+        val speculativeDecodingEngaged: Boolean,
+        @Volatile var lastUseAtMs: Long = android.os.SystemClock.elapsedRealtime(),
+    )
+
+    /**
+     * Pre-initialize only the model Engine. A real request creates the Conversation with
+     * its exact system instruction, sampler settings and native tool declarations.
+     * Shares [mutex] with ensureLoaded/streamTurns to avoid duplicate initialization.
+     * All failures remain best-effort: normal generation still has its original fallback.
+     */
+    @OptIn(ExperimentalApi::class)
+    suspend fun preloadEngine(
+        modelPath: String,
+        preferredAccel: String? = null,
+        forceCpu: Boolean = false,
+        maxNumTokens: Int = 4096,
+        supportImage: Boolean = false,
+        supportAudio: Boolean = false,
+        visionAccelerator: String = "gpu",
+    ) = mutex.withLock {
+        val requestedAccel = if (forceCpu) "CPU"
+            else sessionFallbackAccelerator ?: preferredAccel ?: AcceleratorProbe.probeLiteRt(context)
+        val accel = if (crashedPreviously(modelPath, requestedAccel)) {
+            sessionFallbackAccelerator = "CPU"
+            "CPU"
+        } else requestedAccel
+        // Provider currently uses speculativeDecoding=false for all models.
+        val key = EngineKey(
+            modelPath = modelPath,
+            accelerator = accel,
+            maxNumTokens = maxNumTokens,
+            supportImage = supportImage,
+            supportAudio = supportAudio,
+            speculativeDecoding = false,
+            visionAccelerator = visionAccelerator,
+        )
+        val existing = loaded
+        if (existing?.engineKey == key) return@withLock
+        // Avoid swapping a live Engine in the small gap between ensureLoaded and
+        // streamTurns. The first real request can perform the usual model switch.
+        if (existing != null) return@withLock
+        preloaded?.let { staged ->
+            if (staged.engineKey == key) {
+                staged.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
+                armIdleTeardown()
+                return@withLock
+            }
+        }
+        // Replace only an unused staged Engine; never interrupt a live Conversation.
+        try { preloaded?.engine?.close() } catch (_: Throwable) {}
+        preloaded = null
+
+        val fileSupportsSpec = try {
+            Capabilities(modelPath).use { it.hasSpeculativeDecodingSupport() }
+        } catch (_: Throwable) { false }
+        val attempts = buildList {
+            add(key)
+            if (supportImage) add(key.copy(supportImage = false))
+            if (accel != "CPU") {
+                add(key.copy(accelerator = "CPU"))
+                if (supportImage) add(key.copy(accelerator = "CPU", supportImage = false))
+            }
+        }
+        for (candidate in attempts) {
+            try {
+                armCrashMarker(modelPath, candidate.accelerator)
+                val engine = createEngineWithBackend(candidate, candidate.accelerator)
+                // Successful Engine init is not a completed GPU inference. Disarm while
+                // parked idle; real generation re-arms before creating a Conversation.
+                disarmCrashMarker()
+                if (candidate.accelerator != accel) {
+                    sessionFallbackAccelerator = candidate.accelerator
+                }
+                preloaded = PreloadedEngine(
+                    engineKey = candidate,
+                    engine = engine,
+                    fileSupportsSpeculativeDecoding = fileSupportsSpec,
+                    speculativeDecodingEngaged = false,
+                )
+                android.util.Log.i(
+                    "LiteRtRuntime",
+                    "preloadEngine: ready ${File(modelPath).name}, ${candidate.accelerator}, " +
+                        "${candidate.maxNumTokens} tokens (conversation deferred)",
+                )
+                armIdleTeardown()
+                return@withLock
+            } catch (t: Throwable) {
+                android.util.Log.w("LiteRtRuntime", "preloadEngine: ${candidate.accelerator} failed", t)
+            }
+        }
+        // Do not prevent the normal generation path from retrying and reporting errors.
+    }
+
+    /** Release only an unused staged Engine, without touching an active Conversation. */
+    suspend fun discardPreloadedEngine(modelPath: String? = null) = mutex.withLock {
+        val staged = preloaded ?: return@withLock
+        if (modelPath == null || staged.engineKey.modelPath == modelPath) {
+            try { staged.engine.close() } catch (_: Throwable) {}
+            preloaded = null
+        }
+    }
 
     /**
      * Inspect a raw engine throwable and re-wrap it as [LiteRtModelCorruptException] if the
@@ -531,6 +643,52 @@ class LiteRtRuntime(private val context: Context) {
                 fileSupportsSpeculativeDecoding = current.fileSupportsSpeculativeDecoding,
                 speculativeDecodingEngaged = current.speculativeDecodingEngaged,
             )
+        }
+
+        // Reuse an Engine initialized while the user was opening/selecting this model.
+        // The request's actual tools, system instruction and sampling config are known
+        // only now, so create the Conversation here, never during preload.
+        preloaded?.let { staged ->
+            if (staged.engineKey == desiredEngineKey ||
+                (desiredEngineKey.supportImage && !staged.engineKey.supportImage &&
+                    staged.engineKey.copy(supportImage = true) == desiredEngineKey)
+            ) {
+                preloaded = null
+                try {
+                    armCrashMarker(modelPath, accel)
+                    val conv = createConversationWithFlags(
+                        staged.engine,
+                        acceleratorToBackend(staged.engineKey.accelerator),
+                        desiredConversationSpec,
+                    )
+                    loaded = LoadedModel(
+                        engineKey = staged.engineKey,
+                        conversationKey = desiredConversationKey,
+                        conversationSpec = desiredConversationSpec,
+                        engine = staged.engine,
+                        conversation = conv,
+                        fileSupportsSpeculativeDecoding = staged.fileSupportsSpeculativeDecoding,
+                        speculativeDecodingEngaged = staged.speculativeDecodingEngaged,
+                    )
+                    android.util.Log.i("LiteRtRuntime", "ensureLoaded: reused preloaded Engine")
+                    armIdleTeardown()
+                    return@withLock LoadOutcome(
+                        accelerator = staged.engineKey.accelerator,
+                        visionEnabled = staged.engineKey.supportImage,
+                        visionFellBackToTextOnly = desiredEngineKey.supportImage &&
+                            !staged.engineKey.supportImage,
+                        fileSupportsSpeculativeDecoding = staged.fileSupportsSpeculativeDecoding,
+                        speculativeDecodingEngaged = staged.speculativeDecodingEngaged,
+                    )
+                } catch (t: Throwable) {
+                    try { staged.engine.close() } catch (_: Throwable) {}
+                    android.util.Log.w("LiteRtRuntime", "preloaded Engine conversation failed; normal load retry", t)
+                }
+            } else {
+                // Settings/model changed during the background load; discard stale Engine.
+                try { staged.engine.close() } catch (_: Throwable) {}
+                preloaded = null
+            }
         }
 
         // Engine swap path: tear down any prior Engine + Conversation.
@@ -723,6 +881,23 @@ class LiteRtRuntime(private val context: Context) {
         accel: String,
         conversationSpec: ConversationSpec,
     ): LoadResult {
+        val engine = createEngineWithBackend(engineKey, accel)
+        val conv = try {
+            createConversationWithFlags(
+                engine = engine,
+                backend = acceleratorToBackend(accel),
+                spec = conversationSpec,
+            )
+        } catch (t: Throwable) {
+            try { engine.close() } catch (_: Throwable) {}
+            throw t
+        }
+        return LoadResult(engine, conv, accel, engineKey.supportImage)
+    }
+
+    /** Engine initialization shared by cold generation and background preload. */
+    @OptIn(ExperimentalApi::class)
+    private suspend fun createEngineWithBackend(engineKey: EngineKey, accel: String): Engine {
         val backend = acceleratorToBackend(accel)
         // Vision backend MUST be GPU for Gemma 3n; audio backend MUST be CPU (Gallery's
         // mandate). Leave each null when the caller didn't request that modality so the
@@ -775,12 +950,7 @@ class LiteRtRuntime(private val context: Context) {
             e
         }
 
-        val conv = createConversationWithFlags(
-            engine = engine,
-            backend = backend,
-            spec = conversationSpec,
-        )
-        return LoadResult(engine, conv, accel, engineKey.supportImage)
+        return engine
     }
 
     /**
@@ -1049,7 +1219,9 @@ class LiteRtRuntime(private val context: Context) {
         mutex.withLock {
             try { loaded?.conversation?.close() } catch (_: Throwable) {}
             try { loaded?.engine?.close() } catch (_: Throwable) {}
+            try { preloaded?.engine?.close() } catch (_: Throwable) {}
             loaded = null
+            preloaded = null
             lastTelemetry = null
         }
     }
