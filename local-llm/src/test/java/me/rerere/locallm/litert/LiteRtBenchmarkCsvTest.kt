@@ -1,12 +1,11 @@
 package me.rerere.locallm.litert
 
-import com.google.ai.edge.litertlm.BenchmarkInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LiteRtBenchmarkCsvTest {
-    private fun info(init: Double, prefill: Double, decode: Double): BenchmarkInfo = BenchmarkInfo(
+    private fun info(init: Double, prefill: Double, decode: Double): LiteRtBenchmarkRunner.Metrics = LiteRtBenchmarkRunner.Metrics(
         initTimeInSecond = init,
         timeToFirstTokenInSecond = 0.5,
         lastPrefillTokenCount = 256,

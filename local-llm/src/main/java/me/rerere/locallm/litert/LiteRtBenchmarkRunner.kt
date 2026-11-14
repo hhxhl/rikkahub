@@ -2,7 +2,6 @@ package me.rerere.locallm.litert
 
 import android.content.Context
 import com.google.ai.edge.litertlm.Backend
-import com.google.ai.edge.litertlm.BenchmarkInfo
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.benchmark
 import java.io.File
@@ -19,7 +18,17 @@ class LiteRtBenchmarkRunner(
     private val runtime: LiteRtRuntime,
     private val preferences: LocalRuntimePreferences,
 ) {
-    data class Run(val index: Int, val metrics: BenchmarkInfo)
+    /** Public benchmark snapshot without exposing LiteRT-LM SDK types to the app module. */
+    data class Metrics(
+        val initTimeInSecond: Double,
+        val timeToFirstTokenInSecond: Double,
+        val lastPrefillTokenCount: Int,
+        val lastDecodeTokenCount: Int,
+        val lastPrefillTokensPerSecond: Double,
+        val lastDecodeTokensPerSecond: Double,
+    )
+
+    data class Run(val index: Int, val metrics: Metrics)
 
     data class Result(
         val modelName: String,
@@ -104,7 +113,16 @@ class LiteRtBenchmarkRunner(
                         decodeTokens = decodeTokens,
                         cacheDir = cache.absolutePath,
                     )
-                    results.add(Run(index + 1, info))
+                    // Keep the SDK's BenchmarkInfo internal to :local-llm. Public API
+                    // must not expose it because the dependency uses `implementation`.
+                    results.add(Run(index + 1, Metrics(
+                        initTimeInSecond = info.initTimeInSecond,
+                        timeToFirstTokenInSecond = info.timeToFirstTokenInSecond,
+                        lastPrefillTokenCount = info.lastPrefillTokenCount,
+                        lastDecodeTokenCount = info.lastDecodeTokenCount,
+                        lastPrefillTokensPerSecond = info.lastPrefillTokensPerSecond,
+                        lastDecodeTokensPerSecond = info.lastDecodeTokensPerSecond,
+                    )))
                     onProgress(index + 1)
                 }
                 Result(
