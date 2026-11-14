@@ -395,6 +395,7 @@ private fun AddASRProviderButton(onAdd: (ASRProviderSetting) -> Unit) {
             { ASRProviderSetting.Volcengine() },
             { ASRProviderSetting.MiMo() },
             { ASRProviderSetting.Step() },
+            { ASRProviderSetting.AndroidSystem() },
         )
     }
 

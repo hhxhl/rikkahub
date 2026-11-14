@@ -26,6 +26,7 @@ val ASRProviderSetting.typeName: String
         is ASRProviderSetting.Volcengine -> "Volcengine"
         is ASRProviderSetting.MiMo -> "MiMo"
         is ASRProviderSetting.Step -> "Step"
+        is ASRProviderSetting.AndroidSystem -> "Android System ASR"
     }
 
 @Composable
@@ -66,6 +67,7 @@ fun ASRProviderConfigure(
                 is ASRProviderSetting.Volcengine -> volcengineASRItems(setting, onValueChange)
                 is ASRProviderSetting.MiMo -> miMoASRItems(setting, onValueChange)
                 is ASRProviderSetting.Step -> stepASRItems(setting, onValueChange)
+                is ASRProviderSetting.AndroidSystem -> androidSystemASRItems(setting, onValueChange)
             }
         }
     }
@@ -535,6 +537,25 @@ private fun CardGroupScope.stepASRItems(
             },
             modifier = Modifier.fillMaxWidth(),
             placeholder = { Text("热词1, 热词2, 热词3") }
+        )
+    }
+}
+
+/** Settings for the default Android RecognitionService, including Marmalade STT. */
+private fun CardGroupScope.androidSystemASRItems(
+    setting: ASRProviderSetting.AndroidSystem,
+    onValueChange: (ASRProviderSetting) -> Unit,
+) {
+    formItem(
+        headlineContent = { Text(stringResource(R.string.setting_asr_configure_language)) },
+        supportingContent = { Text(stringResource(R.string.setting_asr_configure_language_code_desc)) },
+    ) {
+        OutlinedTextField(
+            value = setting.language,
+            onValueChange = { onValueChange(setting.copy(language = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("zh-CN") },
+            singleLine = true,
         )
     }
 }
