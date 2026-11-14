@@ -230,38 +230,6 @@ class LiteRtRuntime(private val context: Context) {
     private fun crashedPreviously(modelPath: String, accel: String): Boolean =
         accel != "CPU" && crashMarkers.getBoolean(crashMarkerKey(modelPath, accel), false)
 
-    /** Last-known telemetry from [streamTurns]. Read by [LiteRtProvider] after each stream
-     *  completes so the rolling perf samples can be persisted. Cleared on engine teardown. */
-    @Volatile
-    var lastTelemetry: StreamTelemetry? = null
-        private set
-
-    /**
-     * One completed generation. Token counts and rates come exclusively from
-     * LiteRT-LM's native BenchmarkInfo; unavailable data stays null, never estimated.
-     * `prefillMs` measures time to the first chunk (not pure prefill time).
-     * `decodeMs` measures the remaining wall-clock time after that first chunk.
-     * `kvCacheTokens` is the Conversation's current occupancy, NOT its capacity.
-     */
-    data class StreamTelemetry(
-        val prefillMs: Long,
-        val decodeMs: Long,
-        val specDecodingEngaged: Boolean,
-        val nativePrefillTokenCount: Int? = null,
-        val nativeDecodeTokenCount: Int? = null,
-        val nativePrefillTps: Double? = null,
-        val nativeDecodeTps: Double? = null,
-        val nativeTtftMs: Double? = null,
-        val sdkInitMs: Double? = null,
-        val kvCacheTokens: Int? = null,
-        val warmCache: Boolean = false,
-    ) {
-        /** Only complete, measured token counts + speeds should be persisted. */
-        val hasNativeThroughput: Boolean = nativePrefillTokenCount != null &&
-            nativeDecodeTokenCount != null && nativeDecodeTokenCount > 0 &&
-            nativePrefillTps != null && nativeDecodeTps != null && nativeDecodeTps > 0.0
-    }
-
     // ---- Idle teardown ----
     //
     // The Engine + Conversation pin ~2-4 GB of native heap for the loaded model.
@@ -303,7 +271,6 @@ class LiteRtRuntime(private val context: Context) {
                         try { current.conversation.close() } catch (_: Throwable) {}
                         try { current.engine.close() } catch (_: Throwable) {}
                         loaded = null
-                        lastTelemetry = null
                     }
                 }
                 preloaded?.let { staged ->
@@ -443,7 +410,6 @@ class LiteRtRuntime(private val context: Context) {
             try { existing.conversation.close() } catch (_: Throwable) {}
             try { existing.engine.close() } catch (_: Throwable) {}
             loaded = null
-            lastTelemetry = null
         }
         preloaded?.let { staged ->
             if (staged.engineKey == key) {
@@ -969,10 +935,10 @@ class LiteRtRuntime(private val context: Context) {
         )
 
         val engine = withContext(Dispatchers.IO) {
-            // BenchmarkInfo must be enabled BEFORE nativeCreateEngine; it cannot be
-            // retroactively enabled on an already loaded / preloaded Engine (SDK 0.13.1).
-            // Keep this process-wide flag enabled for all subsequent LiteRT Engines.
-            ExperimentalFlags.enableBenchmark = true
+            // Daily conversations should not enable LiteRT-LM benchmark telemetry.
+            // Normal chat does not collect BenchmarkInfo. The standalone benchmark()
+            // uses its own native handle under the same runtime mutex.
+            ExperimentalFlags.enableBenchmark = false
             // The speculative-decoding flag is temporary and reset after initialize().
             ExperimentalFlags.enableSpeculativeDecoding = engineKey.speculativeDecoding
             val e = try {
@@ -1129,7 +1095,6 @@ class LiteRtRuntime(private val context: Context) {
             }
             instance.pendingStreamOwner = null
             val plan = planTurns(instance.processed, historySignatures, hasMedia)
-            lastTelemetry = null // never expose a previous request's metrics after failure
 
             val inputText: String = when (plan) {
                 is TurnPlan.Warm -> history[plan.sendFromIndex].rawText
@@ -1162,13 +1127,10 @@ class LiteRtRuntime(private val context: Context) {
             for (clip in audioClips) contentList.add(Content.AudioBytes(clip))
             if (inputText.trim().isNotEmpty()) contentList.add(Content.Text(inputText))
 
-            // Native BenchmarkInfo (enabled at Engine init) supplies measured token
-            // counts and rates. Do not infer tokens from input/output characters.
-            val callStartedNs = System.nanoTime()
             // Set once the SDK reports the generation finished (either way). Read from the
             // flow's coroutine in awaitClose to tell a natural end from a cancellation.
             val generationFinished = java.util.concurrent.atomic.AtomicBoolean(false)
-            var firstMessageNs: Long = 0L
+            var firstMessageSeen = false
             val responseBuilder = StringBuilder()
             // How many of the message's tool calls have already been forwarded. The SDK
             // re-delivers the full list on each callback, so forward only the new tail.
@@ -1180,8 +1142,8 @@ class LiteRtRuntime(private val context: Context) {
                 Contents.of(contentList),
                 object : MessageCallback {
                     override fun onMessage(message: Message) {
-                        if (firstMessageNs == 0L) {
-                            firstMessageNs = System.nanoTime()
+                        if (!firstMessageSeen) {
+                            firstMessageSeen = true
                             // The accelerator got through init and prefill and produced a
                             // token, so it is not the one that kills the process.
                             disarmCrashMarker()
@@ -1215,45 +1177,6 @@ class LiteRtRuntime(private val context: Context) {
                         instance.processed.clear()
                         instance.processed.addAll(historySignatures)
                         instance.processed.add(turnSignature(ROLE_ASSISTANT, fullResponse))
-                        // Capture generation end BEFORE optional JNI statistics calls
-                        // so elapsed wall times describe generation only.
-                        val endNs = System.nanoTime()
-                        // The SDK exposes real token counts and tok/s in 0.13.1.
-                        // Failures reading optional metrics must never break a completed
-                        // user response. Avoid logging prompt/response content.
-                        val native = runCatching { conv.getBenchmarkInfo() }
-                            .onFailure {
-                                android.util.Log.w(
-                                    "LiteRtRuntime", "native BenchmarkInfo unavailable; throughput not recorded", it
-                                )
-                            }.getOrNull()
-                        val kvTokens = runCatching { conv.getTokenCount() }
-                            .onFailure {
-                                android.util.Log.w("LiteRtRuntime", "native KV token count unavailable", it)
-                            }.getOrNull()
-                        val prefillMs = if (firstMessageNs > 0L)
-                            (firstMessageNs - callStartedNs) / 1_000_000L else 0L
-                        val decodeMs = if (firstMessageNs > 0L)
-                            (endNs - firstMessageNs) / 1_000_000L else 0L
-                        lastTelemetry = StreamTelemetry(
-                            prefillMs = prefillMs,
-                            decodeMs = decodeMs,
-                            specDecodingEngaged = instance.speculativeDecodingEngaged,
-                            nativePrefillTokenCount = native?.lastPrefillTokenCount
-                                ?.takeIf { it >= 0 },
-                            nativeDecodeTokenCount = native?.lastDecodeTokenCount
-                                ?.takeIf { it >= 0 },
-                            nativePrefillTps = native?.lastPrefillTokensPerSecond
-                                ?.takeIf { it.isFinite() && it >= 0.0 },
-                            nativeDecodeTps = native?.lastDecodeTokensPerSecond
-                                ?.takeIf { it.isFinite() && it >= 0.0 },
-                            nativeTtftMs = native?.timeToFirstTokenInSecond
-                                ?.takeIf { it.isFinite() && it >= 0.0 }?.times(1000.0),
-                            sdkInitMs = native?.initTimeInSecond
-                                ?.takeIf { it.isFinite() && it >= 0.0 }?.times(1000.0),
-                            kvCacheTokens = kvTokens,
-                            warmCache = plan is TurnPlan.Warm,
-                        )
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
                         close()
@@ -1309,6 +1232,43 @@ class LiteRtRuntime(private val context: Context) {
     }
 
     /**
+     * Serializes the standalone LiteRT-LM benchmark with normal chat and preloading.
+     * Releasing the chat engine avoids two multi-GB native engines competing on 8 GB devices.
+     * A request already generating holds [mutex] until it completes. New requests wait
+     * until benchmark() returns. Never expose the benchmark engine as [loaded].
+     *
+     * JNI benchmark() is synchronous; coroutine cancellation is checked between runs.
+     */
+    @OptIn(ExperimentalApi::class)
+    suspend fun <T> withExclusiveBenchmark(
+        modelPath: String, accelerator: String, block: suspend () -> T,
+    ): T {
+        mutex.lock()
+        try {
+            // ensureLoaded -> streamTurns is a two-call handoff. Do not take its
+            // engine away in that gap even though the mutex is briefly unlocked.
+            check(loaded?.pendingStreamOwner == null) {
+                "A local generation is about to start; retry Benchmark when it finishes"
+            }
+            idleTeardownJob?.cancel()
+            idleTeardownJob = null
+            try { loaded?.conversation?.close() } catch (_: Throwable) {}
+            try { loaded?.engine?.close() } catch (_: Throwable) {}
+            try { preloaded?.engine?.close() } catch (_: Throwable) {}
+            loaded = null
+            preloaded = null
+            // The normal chat Engine always starts with this flag off.
+            ExperimentalFlags.enableBenchmark = false
+            // Preserve the existing native-crash recovery on the benchmark GPU path.
+            armCrashMarker(modelPath, accelerator)
+            return block()
+        } finally {
+            disarmCrashMarker()
+            mutex.unlock()
+        }
+    }
+
+    /**
      * Tear down the currently loaded engine + conversation, if any.
      */
     suspend fun closeIfLoaded() {
@@ -1320,7 +1280,6 @@ class LiteRtRuntime(private val context: Context) {
             try { preloaded?.engine?.close() } catch (_: Throwable) {}
             loaded = null
             preloaded = null
-            lastTelemetry = null
         }
     }
 

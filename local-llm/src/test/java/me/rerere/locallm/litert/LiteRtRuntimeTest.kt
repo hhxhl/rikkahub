@@ -25,57 +25,6 @@ import org.junit.Test
  */
 class LiteRtRuntimeTest {
 
-    // ---- Native LiteRT-LM telemetry ------------------------------------------------
-
-    @Test
-    fun `native token rates are exposed unchanged`() {
-        val stat = LiteRtRuntime.StreamTelemetry(
-            prefillMs = 500,
-            decodeMs = 2000,
-            specDecodingEngaged = false,
-            nativePrefillTokenCount = 88,
-            nativeDecodeTokenCount = 44,
-            nativePrefillTps = 176.0,
-            nativeDecodeTps = 22.0,
-            nativeTtftMs = 545.0,
-            kvCacheTokens = 370,
-            warmCache = true,
-        )
-        assertTrue(stat.hasNativeThroughput)
-        assertEquals(176.0, stat.nativePrefillTps!!, 0.001)
-        assertEquals(22.0, stat.nativeDecodeTps!!, 0.001)
-        assertEquals(370, stat.kvCacheTokens)
-        assertTrue(stat.warmCache)
-    }
-
-    @Test
-    fun `SDK benchmark failure does not infer token rates from characters`() {
-        val stat = LiteRtRuntime.StreamTelemetry(
-            prefillMs = 500,
-            decodeMs = 2000,
-            specDecodingEngaged = false,
-        )
-        assertFalse(stat.hasNativeThroughput)
-        assertEquals(null, stat.nativePrefillTps)
-        assertEquals(null, stat.nativeDecodeTps)
-        assertEquals(null, stat.nativePrefillTokenCount)
-    }
-
-    @Test
-    fun `partial native statistics never qualify for recording`() {
-        val stat = LiteRtRuntime.StreamTelemetry(
-            prefillMs = 150,
-            decodeMs = 900,
-            specDecodingEngaged = false,
-            nativePrefillTokenCount = 80,
-            nativeDecodeTokenCount = 20,
-            nativePrefillTps = 120.0,
-            // Decode speed is unavailable, so do not save a half-native sample.
-        )
-        assertFalse(stat.hasNativeThroughput)
-        assertEquals(null, stat.nativeDecodeTps)
-    }
-
     // ---- planTurns -----------------------------------------------------------------
 
     private val u1 = turnSignature(ROLE_USER, "hello")

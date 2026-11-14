@@ -558,51 +558,6 @@ class LiteRtProvider(
             }
         }
 
-        // ---- Persist native LiteRT-LM performance statistics --------------------------
-        // Missing or partial BenchmarkInfo is NOT replaced by a character-based estimate.
-        // No prompt/response text is logged; existing measured samples remain timestamped.
-        runtime.lastTelemetry?.let { tele ->
-            val prefillTps = tele.nativePrefillTps
-            val decodeTps = tele.nativeDecodeTps
-            val prefillTokens = tele.nativePrefillTokenCount
-            val decodeTokens = tele.nativeDecodeTokenCount
-            if (tele.hasNativeThroughput && prefillTps != null && decodeTps != null &&
-                prefillTokens != null && decodeTokens != null
-            ) {
-                runCatching {
-                    prefs.setPerfTelemetry(
-                        LocalRuntime.LiteRT,
-                        LocalRuntimePreferences.PerfSample(
-                            modelId = params.model.modelId,
-                            prefillTps = prefillTps,
-                            decodeTps = decodeTps,
-                            specDecodingEngaged = tele.specDecodingEngaged,
-                            sampledAtMs = System.currentTimeMillis(),
-                            prefillTokenCount = prefillTokens,
-                            decodeTokenCount = decodeTokens,
-                            ttftMs = tele.nativeTtftMs,
-                            kvCacheTokens = tele.kvCacheTokens,
-                            warmCache = tele.warmCache,
-                            sdkInitMs = tele.sdkInitMs,
-                        ),
-                    )
-                }.onFailure { Log.w(TAG, "setPerfTelemetry failed", it) }
-                Log.i(
-                    TAG,
-                    "telemetry: source=native prefill=${"%.2f".format(prefillTps)} tok/s " +
-                        "decode=${"%.2f".format(decodeTps)} tok/s " +
-                        "prefillTokens=$prefillTokens decodeTokens=$decodeTokens " +
-                        "ttftMs=${tele.nativeTtftMs} kvCacheTokens=${tele.kvCacheTokens} " +
-                        "warmCache=${tele.warmCache} sdkInitMs=${tele.sdkInitMs} " +
-                        "firstChunkMs=${tele.prefillMs} remainingWallMs=${tele.decodeMs} " +
-                        "specDecoding=${tele.specDecodingEngaged}",
-                )
-            } else {
-                Log.i(TAG, "telemetry: native throughput unavailable; no sample saved " +
-                    "(firstChunkMs=${tele.prefillMs} remainingWallMs=${tele.decodeMs})")
-            }
-        }
-
         // Close the stream. Tool calls were republished as tool parts above and have NOT
         // run yet: the host executes them after applying approval and the HARDLINE floor,
         // then calls back in with the results. Reporting "tool_calls" is what tells the
