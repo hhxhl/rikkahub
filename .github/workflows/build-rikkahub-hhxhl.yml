@@ -3,6 +3,12 @@ name: Build RikkaHub (hhxhl)
 # Manual signed release build; upload APKs to Actions Artifacts only.
 on:
   workflow_dispatch:
+    inputs:
+      build_branch:
+        description: '要构建的源码分支'
+        required: true
+        default: 'master-hhxhl'
+        type: string
 
 permissions:
   contents: read
@@ -17,6 +23,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.build_branch }}
           fetch-depth: 0
 
       - name: Set up JDK 21
