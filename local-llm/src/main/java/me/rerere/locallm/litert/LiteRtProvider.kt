@@ -558,34 +558,48 @@ class LiteRtProvider(
             }
         }
 
-        // ---- Persist tok/s telemetry --------------------------------------------------
-        // After a clean stream the runtime stamps lastTelemetry with prefill / decode
-        // timings and character counts. Persist it per-model so the Settings page can
-        // render "Last gen: 12.4 tok/s prefill, 2.7 tok/s decode" without re-running
-        // inference. Best-effort: a write failure must never break the user's reply.
+        // ---- Persist native LiteRT-LM performance statistics --------------------------
+        // Missing or partial BenchmarkInfo is NOT replaced by a character-based estimate.
+        // No prompt/response text is logged; existing measured samples remain timestamped.
         runtime.lastTelemetry?.let { tele ->
-            // Only persist samples with non-trivial timings — a zero-decode case would
-            // be the SDK emitting no tokens, which is already a bug we want to see
-            // elsewhere; persisting tps=0 muddies the rolling average.
-            if (tele.decodeMs > 100 && tele.outputCharCount > 0) {
+            val prefillTps = tele.nativePrefillTps
+            val decodeTps = tele.nativeDecodeTps
+            val prefillTokens = tele.nativePrefillTokenCount
+            val decodeTokens = tele.nativeDecodeTokenCount
+            if (tele.hasNativeThroughput && prefillTps != null && decodeTps != null &&
+                prefillTokens != null && decodeTokens != null
+            ) {
                 runCatching {
                     prefs.setPerfTelemetry(
                         LocalRuntime.LiteRT,
                         LocalRuntimePreferences.PerfSample(
                             modelId = params.model.modelId,
-                            prefillTps = tele.prefillTps,
-                            decodeTps = tele.decodeTps,
+                            prefillTps = prefillTps,
+                            decodeTps = decodeTps,
                             specDecodingEngaged = tele.specDecodingEngaged,
                             sampledAtMs = System.currentTimeMillis(),
+                            prefillTokenCount = prefillTokens,
+                            decodeTokenCount = decodeTokens,
+                            ttftMs = tele.nativeTtftMs,
+                            kvCacheTokens = tele.kvCacheTokens,
+                            warmCache = tele.warmCache,
+                            sdkInitMs = tele.sdkInitMs,
                         ),
                     )
                 }.onFailure { Log.w(TAG, "setPerfTelemetry failed", it) }
                 Log.i(
                     TAG,
-                    "telemetry: prefill=${"%.2f".format(tele.prefillTps)} tok/s decode=${"%.2f".format(tele.decodeTps)} tok/s " +
-                        "(prefillMs=${tele.prefillMs} decodeMs=${tele.decodeMs} inChars=${tele.inputCharCount} outChars=${tele.outputCharCount} " +
-                        "specDecoding=${tele.specDecodingEngaged})",
+                    "telemetry: source=native prefill=${"%.2f".format(prefillTps)} tok/s " +
+                        "decode=${"%.2f".format(decodeTps)} tok/s " +
+                        "prefillTokens=$prefillTokens decodeTokens=$decodeTokens " +
+                        "ttftMs=${tele.nativeTtftMs} kvCacheTokens=${tele.kvCacheTokens} " +
+                        "warmCache=${tele.warmCache} sdkInitMs=${tele.sdkInitMs} " +
+                        "firstChunkMs=${tele.prefillMs} remainingWallMs=${tele.decodeMs} " +
+                        "specDecoding=${tele.specDecodingEngaged}",
                 )
+            } else {
+                Log.i(TAG, "telemetry: native throughput unavailable; no sample saved " +
+                    "(firstChunkMs=${tele.prefillMs} remainingWallMs=${tele.decodeMs})")
             }
         }
 

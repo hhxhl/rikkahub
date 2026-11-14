@@ -237,30 +237,29 @@ class LiteRtRuntime(private val context: Context) {
         private set
 
     /**
-     * Per-stream timing + token counts. `prefillTps` = input tokens / time from
-     * `sendMessageAsync` to first `onMessage`; `decodeTps` = output tokens / time from
-     * first onMessage to onDone. Token counts are character-based estimates (cumulative
-     * String.length divided by ~4 chars/token) because the SDK does not surface a per-call
-     * tokenizer counter — accurate within ~10% for English text, less for CJK.
+     * One completed generation. Token counts and rates come exclusively from
+     * LiteRT-LM's native BenchmarkInfo; unavailable data stays null, never estimated.
+     * `prefillMs` measures time to the first chunk (not pure prefill time).
+     * `decodeMs` measures the remaining wall-clock time after that first chunk.
+     * `kvCacheTokens` is the Conversation's current occupancy, NOT its capacity.
      */
     data class StreamTelemetry(
         val prefillMs: Long,
         val decodeMs: Long,
-        val inputCharCount: Int,
-        val outputCharCount: Int,
         val specDecodingEngaged: Boolean,
+        val nativePrefillTokenCount: Int? = null,
+        val nativeDecodeTokenCount: Int? = null,
+        val nativePrefillTps: Double? = null,
+        val nativeDecodeTps: Double? = null,
+        val nativeTtftMs: Double? = null,
+        val sdkInitMs: Double? = null,
+        val kvCacheTokens: Int? = null,
+        val warmCache: Boolean = false,
     ) {
-        val prefillTps: Double = if (prefillMs > 0)
-            (inputCharCount.toDouble() / CHARS_PER_TOKEN) * 1000.0 / prefillMs else 0.0
-        val decodeTps: Double = if (decodeMs > 0)
-            (outputCharCount.toDouble() / CHARS_PER_TOKEN) * 1000.0 / decodeMs else 0.0
-
-        companion object {
-            /** Conservative estimate. Underestimates speed for English (true rate ~3.5
-             *  chars/token) and overestimates for CJK (~1.5 chars/token), but consistent
-             *  enough for relative speed comparisons across runs on the same model. */
-            const val CHARS_PER_TOKEN: Int = 4
-        }
+        /** Only complete, measured token counts + speeds should be persisted. */
+        val hasNativeThroughput: Boolean = nativePrefillTokenCount != null &&
+            nativeDecodeTokenCount != null && nativeDecodeTokenCount > 0 &&
+            nativePrefillTps != null && nativeDecodeTps != null && nativeDecodeTps > 0.0
     }
 
     // ---- Idle teardown ----
@@ -970,12 +969,22 @@ class LiteRtRuntime(private val context: Context) {
         )
 
         val engine = withContext(Dispatchers.IO) {
-            // The flag dance: set BEFORE constructing the Engine, reset AFTER initialize().
+            // BenchmarkInfo must be enabled BEFORE nativeCreateEngine; it cannot be
+            // retroactively enabled on an already loaded / preloaded Engine (SDK 0.13.1).
+            // Keep this process-wide flag enabled for all subsequent LiteRT Engines.
+            ExperimentalFlags.enableBenchmark = true
+            // The speculative-decoding flag is temporary and reset after initialize().
             ExperimentalFlags.enableSpeculativeDecoding = engineKey.speculativeDecoding
             val e = try {
                 Engine(engineConfig).also { built ->
                     try {
+                        val initStartedNs = System.nanoTime()
                         built.initialize()
+                        android.util.Log.i(
+                            "LiteRtRuntime",
+                            "perf: engineInitMs=${(System.nanoTime() - initStartedNs) / 1_000_000L} " +
+                                "accelerator=$accel model=${File(engineKey.modelPath).name}",
+                        )
                     } catch (t: Throwable) {
                         // Close the partially-constructed engine to release its native
                         // handle before propagating.
@@ -1007,7 +1016,8 @@ class LiteRtRuntime(private val context: Context) {
     ): Conversation {
         ExperimentalFlags.enableConversationConstrainedDecoding = spec.constrainedDecoding
         return try {
-            engine.createConversation(
+            val startedNs = System.nanoTime()
+            val conversation = engine.createConversation(
                 ConversationConfig(
                     samplerConfig = if (backend is Backend.NPU) {
                         null
@@ -1028,6 +1038,12 @@ class LiteRtRuntime(private val context: Context) {
                     automaticToolCalling = false,
                 )
             )
+            android.util.Log.i(
+                "LiteRtRuntime",
+                "perf: conversationInitMs=${(System.nanoTime() - startedNs) / 1_000_000L} " +
+                    "backend=${backend.name}",
+            )
+            conversation
         } finally {
             ExperimentalFlags.enableConversationConstrainedDecoding = false
         }
@@ -1065,6 +1081,7 @@ class LiteRtRuntime(private val context: Context) {
      * Caller MUST have called [ensureLoaded] first. The [mutex] is held for the whole
      * inference so two concurrent callers queue up rather than racing the Conversation.
      */
+    @OptIn(ExperimentalApi::class)
     fun streamTurns(
         requestId: String,
         history: List<Turn>,
@@ -1112,6 +1129,7 @@ class LiteRtRuntime(private val context: Context) {
             }
             instance.pendingStreamOwner = null
             val plan = planTurns(instance.processed, historySignatures, hasMedia)
+            lastTelemetry = null // never expose a previous request's metrics after failure
 
             val inputText: String = when (plan) {
                 is TurnPlan.Warm -> history[plan.sendFromIndex].rawText
@@ -1144,12 +1162,8 @@ class LiteRtRuntime(private val context: Context) {
             for (clip in audioClips) contentList.add(Content.AudioBytes(clip))
             if (inputText.trim().isNotEmpty()) contentList.add(Content.Text(inputText))
 
-            // Telemetry. We measure character counts as a proxy for token counts (the SDK
-            // does not surface a per-call tokenizer counter). The cold-path text input
-            // includes the full history + system prompt; the warm path is just the new
-            // turn's raw text. Either way `inputText.length` is the prefill character
-            // budget for this call.
-            val telemetryInputChars = inputText.length
+            // Native BenchmarkInfo (enabled at Engine init) supplies measured token
+            // counts and rates. Do not infer tokens from input/output characters.
             val callStartedNs = System.nanoTime()
             // Set once the SDK reports the generation finished (either way). Read from the
             // flow's coroutine in awaitClose to tell a natural end from a cancellation.
@@ -1201,8 +1215,22 @@ class LiteRtRuntime(private val context: Context) {
                         instance.processed.clear()
                         instance.processed.addAll(historySignatures)
                         instance.processed.add(turnSignature(ROLE_ASSISTANT, fullResponse))
-                        // Stamp telemetry for the provider to read + persist.
+                        // Capture generation end BEFORE optional JNI statistics calls
+                        // so elapsed wall times describe generation only.
                         val endNs = System.nanoTime()
+                        // The SDK exposes real token counts and tok/s in 0.13.1.
+                        // Failures reading optional metrics must never break a completed
+                        // user response. Avoid logging prompt/response content.
+                        val native = runCatching { conv.getBenchmarkInfo() }
+                            .onFailure {
+                                android.util.Log.w(
+                                    "LiteRtRuntime", "native BenchmarkInfo unavailable; throughput not recorded", it
+                                )
+                            }.getOrNull()
+                        val kvTokens = runCatching { conv.getTokenCount() }
+                            .onFailure {
+                                android.util.Log.w("LiteRtRuntime", "native KV token count unavailable", it)
+                            }.getOrNull()
                         val prefillMs = if (firstMessageNs > 0L)
                             (firstMessageNs - callStartedNs) / 1_000_000L else 0L
                         val decodeMs = if (firstMessageNs > 0L)
@@ -1210,9 +1238,21 @@ class LiteRtRuntime(private val context: Context) {
                         lastTelemetry = StreamTelemetry(
                             prefillMs = prefillMs,
                             decodeMs = decodeMs,
-                            inputCharCount = telemetryInputChars,
-                            outputCharCount = fullResponse.length,
                             specDecodingEngaged = instance.speculativeDecodingEngaged,
+                            nativePrefillTokenCount = native?.lastPrefillTokenCount
+                                ?.takeIf { it >= 0 },
+                            nativeDecodeTokenCount = native?.lastDecodeTokenCount
+                                ?.takeIf { it >= 0 },
+                            nativePrefillTps = native?.lastPrefillTokensPerSecond
+                                ?.takeIf { it.isFinite() && it >= 0.0 },
+                            nativeDecodeTps = native?.lastDecodeTokensPerSecond
+                                ?.takeIf { it.isFinite() && it >= 0.0 },
+                            nativeTtftMs = native?.timeToFirstTokenInSecond
+                                ?.takeIf { it.isFinite() && it >= 0.0 }?.times(1000.0),
+                            sdkInitMs = native?.initTimeInSecond
+                                ?.takeIf { it.isFinite() && it >= 0.0 }?.times(1000.0),
+                            kvCacheTokens = kvTokens,
+                            warmCache = plan is TurnPlan.Warm,
                         )
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)

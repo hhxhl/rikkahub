@@ -93,8 +93,8 @@ class LocalRuntimePreferences(private val context: Context) {
      * a fresh probe. Then writes [currentSdkVersion] back. Idempotent — second call in
      * the same app session is a no-op. Safe to call from app startup.
      */
-    /** Per-modelId last-known telemetry sample: prefill tok/s and decode tok/s. Stored as
-     *  a JSON map: { modelId -> "prefillTps|decodeTps|specDecodingEngaged|sampledAtMs" }. */
+    /** Per-modelId latest native telemetry. Legacy estimates are ignored on read;
+     *  only records explicitly tagged native with measured tokens are accepted. */
     private fun perfTelemetryKey(runtime: LocalRuntime) =
         stringPreferencesKey("perf_telemetry_${runtime.displayName}")
 
@@ -104,13 +104,26 @@ class LocalRuntimePreferences(private val context: Context) {
         val decodeTps: Double,
         val specDecodingEngaged: Boolean,
         val sampledAtMs: Long,
+        val prefillTokenCount: Int? = null,
+        val decodeTokenCount: Int? = null,
+        val ttftMs: Double? = null,
+        /** Occupied KV-cache tokens, not KV-cache capacity. */
+        val kvCacheTokens: Int? = null,
+        val warmCache: Boolean? = null,
+        /** The SDK's combined initialization metric, not Engine-only init time. */
+        val sdkInitMs: Double? = null,
     )
 
     private fun encodePerfMap(map: Map<String, PerfSample>): String =
         json.encodeToString(
             MapSerializer(String.serializer(), String.serializer()),
             map.mapValues { (_, s) ->
-                "${s.prefillTps}|${s.decodeTps}|${s.specDecodingEngaged}|${s.sampledAtMs}"
+                listOf(
+                    s.prefillTps, s.decodeTps, s.specDecodingEngaged, s.sampledAtMs,
+                    "native", s.prefillTokenCount ?: "", s.decodeTokenCount ?: "",
+                    s.ttftMs ?: "", s.kvCacheTokens ?: "", s.warmCache ?: "",
+                    s.sdkInitMs ?: "",
+                ).joinToString("|")
             },
         )
 
@@ -124,12 +137,32 @@ class LocalRuntimePreferences(private val context: Context) {
         }.getOrDefault(emptyMap())
         return rawMap.mapNotNull { (modelId, packed) ->
             val parts = packed.split("|")
-            if (parts.size < 4) return@mapNotNull null
-            val prefill = parts[0].toDoubleOrNull() ?: return@mapNotNull null
-            val decode = parts[1].toDoubleOrNull() ?: return@mapNotNull null
+            // Four-field legacy samples and previously persisted estimates are unreliable.
+            if (parts.getOrNull(4) != "native") return@mapNotNull null
+            val prefill = parts[0].toDoubleOrNull()
+                ?.takeIf { it.isFinite() && it >= 0.0 } ?: return@mapNotNull null
+            val decode = parts[1].toDoubleOrNull()
+                ?.takeIf { it.isFinite() && it >= 0.0 } ?: return@mapNotNull null
+            val prefillTokens = parts.getOrNull(5)?.toIntOrNull()
+                ?.takeIf { it >= 0 } ?: return@mapNotNull null
+            val decodeTokens = parts.getOrNull(6)?.toIntOrNull()
+                ?.takeIf { it > 0 } ?: return@mapNotNull null
+            if (decode <= 0.0) return@mapNotNull null
             val spec = parts[2].toBooleanStrictOrNull() ?: false
             val ts = parts[3].toLongOrNull() ?: return@mapNotNull null
-            modelId to PerfSample(modelId, prefill, decode, spec, ts)
+            modelId to PerfSample(
+                modelId = modelId,
+                prefillTps = prefill,
+                decodeTps = decode,
+                specDecodingEngaged = spec,
+                sampledAtMs = ts,
+                prefillTokenCount = prefillTokens,
+                decodeTokenCount = decodeTokens,
+                ttftMs = parts.getOrNull(7)?.toDoubleOrNull(),
+                kvCacheTokens = parts.getOrNull(8)?.toIntOrNull(),
+                warmCache = parts.getOrNull(9)?.toBooleanStrictOrNull(),
+                sdkInitMs = parts.getOrNull(10)?.toDoubleOrNull(),
+            )
         }.toMap()
     }
 
@@ -144,6 +177,11 @@ class LocalRuntimePreferences(private val context: Context) {
     /** Record the latest perf sample for [modelId]. Overwrites the prior sample for the
      *  same modelId; other models' samples are preserved. */
     suspend fun setPerfTelemetry(runtime: LocalRuntime, sample: PerfSample) {
+        require(sample.prefillTokenCount != null && sample.prefillTokenCount >= 0 &&
+            sample.decodeTokenCount != null && sample.decodeTokenCount > 0 &&
+            sample.prefillTps.isFinite() && sample.prefillTps >= 0.0 &&
+            sample.decodeTps.isFinite() && sample.decodeTps > 0.0
+        ) { "Only complete native LiteRT-LM throughput samples may be saved" }
         context.localRuntimeDataStore.edit { prefs ->
             val current = decodePerfMap(prefs[perfTelemetryKey(runtime)]).toMutableMap()
             current[sample.modelId] = sample
