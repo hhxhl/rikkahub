@@ -253,7 +253,20 @@ val dataSourceModule = module {
     }
 
     single {
-        ProviderManager(client = get(), context = get(), accountCredentials = get<ProviderAccountManager>())
+        val settingsStore: SettingsStore = get()
+        ProviderManager(client = get(), context = get(), accountCredentials = get<ProviderAccountManager>()).also { manager ->
+            manager.registerProvider(
+                "local_litert",
+                me.rerere.locallm.litert.LiteRtProvider(
+                    context = get(),
+                    runtime = get(),
+                    prefs = get(),
+                    settingsUpdater = { transform ->
+                        settingsStore.update { old -> old.copy(providers = transform(old.providers)) }
+                    },
+                ),
+            )
+        }
     }
 
     single { BackupManager(context = get(), database = get(), settingsStore = get(), json = get()) }

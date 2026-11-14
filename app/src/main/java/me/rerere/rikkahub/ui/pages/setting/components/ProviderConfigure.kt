@@ -115,6 +115,7 @@ fun ProviderConfigure(
             is ProviderSetting.OpenAI -> ProviderConfigureOpenAI(provider, onEdit)
             is ProviderSetting.Google -> ProviderConfigureGoogle(provider, onEdit)
             is ProviderSetting.Claude -> ProviderConfigureClaude(provider, onEdit)
+            is ProviderSetting.LiteRtLocal -> ProviderConfigureLiteRT(provider, onEdit)
             is ProviderSetting.ChatGPT -> ProviderConfigureAccount(
                 provider = provider,
                 onEdit = onEdit,

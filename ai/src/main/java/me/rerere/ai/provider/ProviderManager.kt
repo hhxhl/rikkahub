@@ -65,6 +65,7 @@ class ProviderManager(
             is ProviderSetting.Claude -> getProvider("claude")
             is ProviderSetting.ChatGPT -> getProvider("chatgpt")
             is ProviderSetting.Grok -> getProvider("grok")
+            is ProviderSetting.LiteRtLocal -> getProvider("local_litert")
         } as Provider<T>
     }
 }

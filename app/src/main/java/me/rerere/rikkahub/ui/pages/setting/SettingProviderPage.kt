@@ -582,6 +582,7 @@ private fun AddButton(onAdd: (ProviderSetting) -> Unit) {
             ProviderSetting.Claude(),
             ProviderSetting.ChatGPT(),
             ProviderSetting.Grok(),
+            ProviderSetting.LiteRtLocal(),
         )
     }
 
@@ -656,6 +657,7 @@ private fun ProviderSetting.typeName(): String = when (this) {
     is ProviderSetting.Claude -> "Claude"
     is ProviderSetting.ChatGPT -> stringResource(R.string.setting_provider_page_type_subscription, "ChatGPT")
     is ProviderSetting.Grok -> stringResource(R.string.setting_provider_page_type_subscription, "Grok")
+    is ProviderSetting.LiteRtLocal -> "Local · LiteRT"
 }
 
 @Composable
