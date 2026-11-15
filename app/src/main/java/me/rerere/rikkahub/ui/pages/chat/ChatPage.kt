@@ -185,11 +185,12 @@ fun ChatPage(
         it.findProvider(setting.providers) is ProviderSetting.LiteRtLocal
     }?.modelId
     LaunchedEffect(selectedLocalModelId, setting.init, lifecycleState) {
-        liteRtPreloader.onModelSelected(
-            selectedLocalModelId.takeIf {
-                !setting.init && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
-            }
-        )
+        // Leaving the chat screen (for example to inspect LiteRT settings) must not
+        // cancel an in-flight Engine preload. Only a real model selection change
+        // while this page is resumed should update the preloader's selection.
+        if (!setting.init && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)) {
+            liteRtPreloader.onModelSelected(selectedLocalModelId)
+        }
     }
     LaunchedEffect(assistantVoiceRequested, setting.init, currentChatModel, lifecycleState) {
         // A warm assistant launch may arrive while the previous chat Activity is still

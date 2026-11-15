@@ -196,11 +196,6 @@ fun ProviderConfigureLiteRT(
                     )
                 }
             }
-            Text(
-                "各模型独立选择 CPU / GPU / NPU；初始化失败直接报错，不自动回退。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 

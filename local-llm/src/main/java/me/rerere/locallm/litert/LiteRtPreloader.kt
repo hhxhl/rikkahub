@@ -50,7 +50,15 @@ class LiteRtPreloader(
 
     /** Fire-and-forget; normal Provider.ensureLoaded remains the fallback on any failure. */
     fun onModelSelected(modelFile: String?) {
-        if (selectedModel == modelFile) return
+        if (selectedModel == modelFile) {
+            // The same model can be selected again after idle teardown, a Benchmark,
+            // or a backend/config change that closed the Engine. Retry its preload
+            // when the chat page resumes, even if its model selection is unchanged.
+            if (modelFile != null && runtime.backendStatus.value?.modelName != modelFile) {
+                requests.trySend(modelFile)
+            }
+            return
+        }
         selectedModel = modelFile
         requests.trySend(modelFile)
     }
