@@ -51,6 +51,8 @@ import me.rerere.locallm.litert.LiteRtModelDefaults
 import me.rerere.locallm.litert.LiteRtModelMetadata
 import me.rerere.locallm.litert.LiteRtRuntime
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.ui.context.LocalToaster
+import me.rerere.ui.toast.ToastType
 import okhttp3.OkHttpClient
 import org.koin.compose.koinInject
 import java.io.File
@@ -75,6 +77,7 @@ fun ProviderConfigureLiteRT(
     val settingsStore = koinInject<SettingsStore>()
     val client = koinInject<OkHttpClient>()
     val scope = rememberCoroutineScope()
+    val toaster = LocalToaster.current
     val currentProvider by rememberUpdatedState(provider)
     val currentOnEdit by rememberUpdatedState(onEdit)
 
@@ -129,7 +132,12 @@ fun ProviderConfigureLiteRT(
             try {
                 task()
             } catch (e: Exception) {
-                status = e.message ?: e.javaClass.simpleName
+                val message = e.message ?: e.javaClass.simpleName
+                if (section == LiteRtConfigSection.RUNTIME) {
+                    toaster.show(message, type = ToastType.Error)
+                } else {
+                    status = message
+                }
             } finally {
                 busy = false
                 transferProgress = null
@@ -169,7 +177,14 @@ fun ProviderConfigureLiteRT(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     val backendLabel = activeBackend?.backend ?: "未加载"
-                    val reason = activeBackend?.note?.takeIf(String::isNotBlank)
+                    val reason = activeBackend?.note
+                        ?.substringBefore("，已自动回退")
+                        ?.substringBefore("，已跳过并使用")
+                        ?.takeIf {
+                            it.isNotBlank() &&
+                                it != "强制 CPU 模式" &&
+                                !it.startsWith("沿用此前自动回退")
+                        }
                     LiteRtStatusRow(
                         label = "实际运行后端",
                         value = if (reason == null) backendLabel else "$backendLabel（$reason）",
@@ -234,17 +249,20 @@ fun ProviderConfigureLiteRT(
                             prefs.setAccelerator(LocalRuntime.LiteRT, "GPU")
                             prefs.clearCrashRecovery(LocalRuntime.LiteRT)
                             val forcedCpu = prefs.forceCpu(LocalRuntime.LiteRT)
-                            status = if (forcedCpu) {
-                                "已清除 $removed 条 GPU 崩溃记录；请先关闭「强制 CPU」，再重启应用重试 GPU。"
-                            } else {
-                                "已清除 $removed 条 GPU 崩溃记录并重置 CPU 回退缓存；重启应用后将重新尝试 GPU。"
+                            val message = when {
+                                removed == 0 -> "没有需要清除的 GPU 崩溃记录"
+                                forcedCpu -> "GPU 错误记录已清除；关闭强制 CPU 并重启后生效"
+                                else -> "GPU 错误记录已清除，重启后生效"
                             }
+                            toaster.show(
+                                message,
+                                type = if (removed > 0) ToastType.Success else ToastType.Info,
+                            )
                         }
                     },
                     enabled = !busy,
                 ) { Text("清除") }
             }
-            if (statusSection == LiteRtConfigSection.RUNTIME) status?.let { Text(it) }
         }
     }
 
@@ -281,11 +299,11 @@ fun ProviderConfigureLiteRT(
                             }
                             prefs.setMaxNumTokensOverride(LocalRuntime.LiteRT, value)
                             runtime.closeIfLoaded() // New EngineConfig takes effect on next request.
-                            status = "上下文设置已保存；实际值仍受模型 KV Cache 上限约束"
+                            status = "上下文设置已应用；下次加载模型时生效"
                         }
                     },
                     enabled = !busy,
-                ) { Text("保存") }
+                ) { Text("应用") }
             }
             if (statusSection == LiteRtConfigSection.CONTEXT) status?.let { Text(it) }
             Text(
