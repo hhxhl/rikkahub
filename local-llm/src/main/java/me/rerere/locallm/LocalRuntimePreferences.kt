@@ -33,6 +33,10 @@ class LocalRuntimePreferences(private val context: Context) {
     private fun installedModelsKey(runtime: LocalRuntime) =
         stringPreferencesKey("installed_${runtime.displayName}")
 
+    /** Box-style accelerator chosen for each model file, independent of previous failures. */
+    private fun modelAcceleratorsKey(runtime: LocalRuntime) =
+        stringPreferencesKey("model_accels_${runtime.displayName}")
+
     /** Per-runtime force-CPU override. The default is device-dependent (see
      *  [defaultForceCpu]): CPU for the Google Tensor crash class, GPU everywhere else.
      *  Users can flip it either way via the "Try GPU acceleration" toggle. */
@@ -129,6 +133,30 @@ class LocalRuntimePreferences(private val context: Context) {
         return runCatching {
             json.decodeFromString(SetSerializer(String.serializer()), raw)
         }.getOrDefault(emptySet())
+    }
+
+    /** Model-specific backend. Existing Agent CPU fallback caches are deliberately ignored.
+     *  New or unconfigured models default to GPU, matching Box's LiteRT path. */
+    fun modelAcceleratorsFlow(runtime: LocalRuntime): Flow<Map<String, String>> =
+        context.localRuntimeDataStore.data.map { prefs ->
+            decodeInstalledMap(prefs[modelAcceleratorsKey(runtime)])
+        }
+
+    suspend fun modelAccelerator(runtime: LocalRuntime, fileName: String): String =
+        modelAcceleratorsFlow(runtime).first()[fileName]
+            ?.takeIf { it == "CPU" || it == "GPU" || it == "NPU" } ?: "GPU"
+
+    suspend fun setModelAccelerator(runtime: LocalRuntime, fileName: String, accelerator: String) {
+        require(accelerator == "CPU" || accelerator == "GPU" || accelerator == "NPU") {
+            "Unsupported LiteRT backend: $accelerator"
+        }
+        context.localRuntimeDataStore.edit { prefs ->
+            val models = decodeInstalledMap(prefs[modelAcceleratorsKey(runtime)]).toMutableMap()
+            models[fileName] = accelerator
+            prefs[modelAcceleratorsKey(runtime)] = json.encodeToString(
+                MapSerializer(String.serializer(), String.serializer()), models,
+            )
+        }
     }
 
     fun acceleratorFlow(runtime: LocalRuntime): Flow<String?> =
@@ -282,6 +310,13 @@ class LocalRuntimePreferences(private val context: Context) {
             val raw = prefs[installedModelsKey(runtime)]
             val current = decodeInstalledMap(raw).toMutableMap()
             current.remove(fileName)
+            val modelAccels = decodeInstalledMap(prefs[modelAcceleratorsKey(runtime)]).toMutableMap()
+            if (modelAccels.remove(fileName) != null) {
+                if (modelAccels.isEmpty()) prefs.remove(modelAcceleratorsKey(runtime))
+                else prefs[modelAcceleratorsKey(runtime)] = json.encodeToString(
+                    MapSerializer(String.serializer(), String.serializer()), modelAccels,
+                )
+            }
             if (current.isEmpty()) {
                 // Remove the key entirely rather than writing an empty JSON object; this keeps the
                 // DataStore clean and makes the "no models installed" path symmetric with the

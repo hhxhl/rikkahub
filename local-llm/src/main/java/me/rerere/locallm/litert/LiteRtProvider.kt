@@ -176,27 +176,14 @@ class LiteRtProvider(
             )
         }
 
-        // Pass the cached accelerator so ensureLoaded does not re-probe on every turn.
-        // Probe runs once at install/re-detect time and is persisted; reading it here
-        // avoids the System.loadLibrary("qnn_delegate_jni") call on every generation.
-        val cachedAccel = prefs.acceleratorFlow(LocalRuntime.LiteRT).first()
-        // Honor the per-runtime force-CPU override. Default true after the LiteRT-LM
-        // 0.11.0 GPU/NNAPI native crashes; users opt back in via the settings toggle.
-        val forceCpu = prefs.forceCpu(LocalRuntime.LiteRT)
+        // Box-style model backend: a fixed explicit CPU/GPU/NPU choice, default GPU.
+        // Never infer it from a previous Engine result or a global CPU fallback cache.
+        val selectedBackend = prefs.modelAccelerator(LocalRuntime.LiteRT, params.model.modelId)
 
         // Per-model defaults curated to mirror Gallery's `model_allowlists/1_0_13.json`
         // (topK / topP / temperature / maxTokens / multimodal flags / speculative decoding).
         // For HF-pasted models that aren't in the table, this returns the FALLBACK config.
         val config = LiteRtModelDefaults.forModelFile(params.model.modelId)
-        // Note: the old pre-flight refusal here (multimodal + forceCpu = throw) has been
-        // removed. With the runtime's vision-encoder fallback path (see
-        // [LiteRtRuntime.LoadOutcome.visionFellBackToTextOnly]) and the per-model
-        // [LocalRuntimePreferences.isVisionUnavailable] flag, a multimodal model on a
-        // force-CPU device just loads text-only — the user can chat with it, they only
-        // lose the ability to pass images. Refusing was wrong: it punished users on
-        // GPU-broken devices (Adreno 7xx + restrictive OEM ROMs, Google Tensor) by
-        // making the bigger Gemma-4 models completely unreachable when a text-only
-        // load would have worked.
         // The model's KV cache ceiling, most specific source first:
         //   1. explicit exported `ekvNNNN` cache marker (if present),
         //   2. the metadata context length (conservative when export size is unknown),
@@ -351,20 +338,9 @@ class LiteRtProvider(
                 "(input byte cap=${promptByteBudget(contextTokens)}B, engine=${contextTokens}t)",
         )
 
-        // Check the persisted vision-unavailable flag. If a prior load fell back to
-        // text-only on this device, skip the GPU vision attempt entirely — saves ~1 s of
-        // doomed engine init per cold load. The user can clear the flag via Settings →
-        // Local · LiteRT if they update GPU drivers or move to a capable device.
-        val visionPersistentlyUnavailable = runCatching {
-            prefs.isVisionUnavailable(LocalRuntime.LiteRT, params.model.modelId)
-        }.getOrDefault(false)
-        // Also honor the per-model config field [LiteRtModelConfig.visionAccelerator] —
-        // when null we never try the GPU vision backend even if the model file contains
-        // vision tensors. Today this is set to null for Gemma-3n entries and to "gpu"
-        // for Gemma-4 entries; treat null as "skip vision regardless".
-        val effectiveSupportImage = config.supportsImage &&
-            config.visionAccelerator != null &&
-            !visionPersistentlyUnavailable
+        // Match Box: use the model's explicit vision configuration. A failed init is
+        // reported instead of silently changing the model's capabilities.
+        val effectiveSupportImage = config.supportsImage && config.visionAccelerator != null
 
         // ---- Engine load with full per-model + per-call config ----
         val requestId = java.util.UUID.randomUUID().toString()
@@ -372,8 +348,7 @@ class LiteRtProvider(
             runtime.ensureLoaded(
                 modelPath = modelPath,
                 requestId = requestId,
-                preferredAccel = cachedAccel,
-                forceCpu = forceCpu,
+                preferredAccel = selectedBackend,
                 maxNumTokens = effectiveMaxNumTokens,
                 supportImage = effectiveSupportImage,
                 supportAudio = config.supportsAudio,
@@ -404,26 +379,8 @@ class LiteRtProvider(
             throw translateSdkError(t, effectiveMaxNumTokens)
         }
         try {
-        val resolvedAccel = outcome.accelerator
-        // Persist whatever the runtime actually used. Without this, the in-runtime
-        // GPU -> CPU fallback only sticks for the current process: every cold start
-        // re-probes the (known-broken-on-this-device) GPU and wastes ~1 s before
-        // landing on CPU again. By persisting we also surface the truth to the
-        // Doctor and Settings UI ("running on CPU because GPU failed at init").
-        if (resolvedAccel != cachedAccel) {
-            runCatching { prefs.setAccelerator(LocalRuntime.LiteRT, resolvedAccel) }
-                .onFailure { Log.w(TAG, "setAccelerator($resolvedAccel) failed", it) }
-        }
-        // If the runtime had to drop vision to text-only on this load, persist that so the
-        // next load skips the doomed GPU vision attempt up front. Only stamp on a true
-        // fallback — not when we already skipped vision because of the persisted flag.
-        if (outcome.visionFellBackToTextOnly && !visionPersistentlyUnavailable) {
-            Log.w(TAG, "Vision encoder unavailable on this device for ${params.model.modelId}; " +
-                "persisting decision so future loads skip the GPU vision attempt")
-            runCatching {
-                prefs.setVisionUnavailable(LocalRuntime.LiteRT, params.model.modelId)
-            }.onFailure { Log.w(TAG, "setVisionUnavailable failed", it) }
-        }
+        // Box-style: do not persist the resolved backend or an implicit fallback.
+        // The user's per-model backend preference is the only source of truth.
 
         // ---- Stream + cumulative→delta conversion ----
         //
@@ -668,27 +625,16 @@ class LiteRtProvider(
      * users on a chat surface.
      */
     private fun translateSdkError(t: Throwable, effectiveMaxNumTokens: Int): Throwable {
-        // Typed exception from the runtime — the structural diagnosis already happened.
-        // Vision-unavailable here means BOTH "GPU vision tried and failed" AND "text-only
-        // retry also failed", i.e. the model truly cannot load on this device's chip class
-        // (typically Adreno 7xx + One UI / OriginOS + multimodal Gemma — upstream LiteRT-LM
-        // issue #2292, OpenGL fallback's CreateSharedMemoryManager is UNIMPLEMENTED).
+        // An unavailable vision executor now surfaces as a load error. Do not imply
+        // a text-only or CPU retry was attempted: Box-style mode does not perform one.
         if (t is LiteRtVisionUnavailableException) {
             return RuntimeException(
-                "This multimodal model could not be loaded on your device. The GPU vision " +
-                    "encoder failed (a known upstream LiteRT-LM issue on Adreno 7xx GPUs + " +
-                    "OEM ROMs that restrict vendor library access), and the text-only " +
-                    "fallback ALSO failed. Pick a text-only model from Settings → Local · " +
-                    "LiteRT (Qwen2.5-1.5B-Instruct is the most reliable) or try a newer " +
-                    "device. If a future LiteRT-LM SDK adds an OpenGL fallback path, an " +
-                    "app update should pick it up automatically.",
+                "LiteRT 视觉后端初始化失败。所选后端不会自动切换；可尝试兼容的纯文本模型。" +
+                    "原因：${t.cause?.message ?: t.message}",
                 t,
             )
         }
-        // Walk the cause chain too — LiteRtRuntime wraps the SDK error inside a
-        // RuntimeException of its own ("LiteRT engine could not load this model on
-        // this device's GPU OR CPU. … Underlying: …"), so the SDK's own text only
-        // appears in the inner cause. Concatenate so the regex catches either layer.
+        // Walk the SDK's exception cause chain to expose context-length errors.
         val joined = generateSequence<Throwable>(t) { it.cause }
             .map { it.message.orEmpty() }
             .joinToString("\n")

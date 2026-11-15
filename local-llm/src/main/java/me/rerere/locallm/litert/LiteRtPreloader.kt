@@ -6,7 +6,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import me.rerere.locallm.LocalRuntime
 import me.rerere.locallm.LocalRuntimePreferences
@@ -66,12 +65,10 @@ class LiteRtPreloader(
         )
         val requestedContext = prefs.maxNumTokensOverride(LocalRuntime.LiteRT) ?: config.maxTokens
         val tokens = LiteRtProvider.engineContextTokens(requestedContext, contextCeiling)
-        val imageSupport = config.supportsImage && config.visionAccelerator != null &&
-            !prefs.isVisionUnavailable(LocalRuntime.LiteRT, modelFile)
+        val imageSupport = config.supportsImage && config.visionAccelerator != null
         return runtime.preloadEngine(
             modelPath = path,
-            preferredAccel = prefs.acceleratorFlow(LocalRuntime.LiteRT).first(),
-            forceCpu = prefs.forceCpu(LocalRuntime.LiteRT),
+            preferredAccel = prefs.modelAccelerator(LocalRuntime.LiteRT, modelFile),
             maxNumTokens = tokens,
             supportImage = imageSupport,
             supportAudio = config.supportsAudio,

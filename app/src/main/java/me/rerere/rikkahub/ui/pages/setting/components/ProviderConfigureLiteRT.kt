@@ -19,7 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -82,7 +82,7 @@ fun ProviderConfigureLiteRT(
     val currentOnEdit by rememberUpdatedState(onEdit)
 
     val installed by prefs.installedModelsFlow(LocalRuntime.LiteRT).collectAsState(initial = emptyMap())
-    val forceCpu by prefs.forceCpuFlow(LocalRuntime.LiteRT).collectAsState(initial = true)
+    val modelAccelerators by prefs.modelAcceleratorsFlow(LocalRuntime.LiteRT).collectAsState(initial = emptyMap())
     val activeBackend by runtime.backendStatus.collectAsState()
     val contextOverride by prefs.maxNumTokensOverrideFlow(LocalRuntime.LiteRT).collectAsState(initial = null)
     var tokenField by remember(contextOverride) { mutableStateOf(contextOverride?.toString().orEmpty()) }
@@ -176,18 +176,9 @@ fun ProviderConfigureLiteRT(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    val backendLabel = activeBackend?.backend ?: "未加载"
-                    val reason = activeBackend?.note
-                        ?.substringBefore("，已自动回退")
-                        ?.substringBefore("，已跳过并使用")
-                        ?.takeIf {
-                            it.isNotBlank() &&
-                                it != "强制 CPU 模式" &&
-                                !it.startsWith("沿用此前自动回退")
-                        }
                     LiteRtStatusRow(
                         label = "实际运行后端",
-                        value = if (reason == null) backendLabel else "$backendLabel（$reason）",
+                        value = activeBackend?.backend ?: "未加载",
                     )
                     LiteRtStatusRow(
                         label = "Engine 状态",
@@ -203,66 +194,11 @@ fun ProviderConfigureLiteRT(
                     )
                 }
             }
-            HorizontalDivider()
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("强制 CPU", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "开启后始终使用 CPU；关闭时优先尝试 GPU",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = forceCpu,
-                    onCheckedChange = { value ->
-                        submit(LiteRtConfigSection.RUNTIME) {
-                            prefs.setForceCpu(LocalRuntime.LiteRT, value)
-                        }
-                    },
-                    enabled = !busy,
-                )
-            }
-            HorizontalDivider()
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("清除 GPU 崩溃记录", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "清除后，下次启动时可重新尝试 GPU",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                OutlinedButton(
-                    onClick = {
-                        submit(LiteRtConfigSection.RUNTIME) {
-                            val removed = runtime.clearGpuCrashMarkers()
-                            // Also invalidate the persisted CPU fallback decision.
-                            prefs.setAccelerator(LocalRuntime.LiteRT, "GPU")
-                            prefs.clearCrashRecovery(LocalRuntime.LiteRT)
-                            val forcedCpu = prefs.forceCpu(LocalRuntime.LiteRT)
-                            val message = when {
-                                removed == 0 -> "没有需要清除的 GPU 崩溃记录"
-                                forcedCpu -> "GPU 错误记录已清除；关闭强制 CPU 并重启后生效"
-                                else -> "GPU 错误记录已清除，重启后生效"
-                            }
-                            toaster.show(
-                                message,
-                                type = if (removed > 0) ToastType.Success else ToastType.Info,
-                            )
-                        }
-                    },
-                    enabled = !busy,
-                ) { Text("清除") }
-            }
+            Text(
+                "各模型独立选择 CPU / GPU / NPU；初始化失败直接报错，不自动回退。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 
@@ -376,6 +312,26 @@ fun ProviderConfigureLiteRT(
                             }
                         },
                     ) { Text("移除") }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("推理后端", style = MaterialTheme.typography.bodySmall)
+                    listOf("CPU", "GPU", "NPU").forEach { backend ->
+                        FilterChip(
+                            selected = (modelAccelerators[model.modelId] ?: "GPU") == backend,
+                            onClick = {
+                                submit(LiteRtConfigSection.RUNTIME) {
+                                    prefs.setModelAccelerator(LocalRuntime.LiteRT, model.modelId, backend)
+                                    runtime.closeIfLoaded()
+                                    toaster.show("已设置 $backend，下次加载生效", type = ToastType.Success)
+                                }
+                            },
+                            label = { Text(backend) },
+                            enabled = !busy && model.modelId in installed,
+                        )
+                    }
                 }
             }
             if (statusSection == LiteRtConfigSection.MODELS) status?.let { Text(it) }

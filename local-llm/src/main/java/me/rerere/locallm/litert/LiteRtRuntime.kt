@@ -36,8 +36,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import me.rerere.locallm.AcceleratorProbe
-import me.rerere.locallm.BuildConfig
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.CancellationException
@@ -227,74 +225,8 @@ class LiteRtRuntime(private val context: Context) {
     /** Engine-only prefetch; no Conversation/KV state until a real request arrives. */
     private var preloaded: PreloadedEngine? = null
 
-    /**
-     * In-session fallback accelerator. If the preferred/probed accelerator failed and we
-     * successfully fell back to CPU, remember that result for the rest of this session so
-     * subsequent loads skip the GPU-init attempt. Resets on app restart (acceptable for v1).
-     */
-    @Volatile private var sessionFallbackAccelerator: String? = null
-
-    // ---- Durable accelerator-crash guard ----
-    //
-    // A GPU delegate that faults takes the whole process down with it. No exception ever
-    // reaches Kotlin, so neither [sessionFallbackAccelerator] nor the CPU retry in
-    // [ensureLoaded] gets a chance to run, and the next launch walks straight back into
-    // the same crash. The only thing that outlives a SIGSEGV is a file: arm a marker
-    // before handing a non-CPU backend to the native engine, disarm it once the model has
-    // actually produced a token, and force CPU while a marker is still standing.
-    //
-    // Keyed on the SDK version so a runtime upgrade that fixes a device re-enables its GPU
-    // instead of leaving it blacklisted forever.
-
-    private val crashMarkers by lazy {
-        context.getSharedPreferences("litert_accel_crash", Context.MODE_PRIVATE)
-    }
-
-    /** Key of the marker currently on disk, so repeat turns skip a redundant write. */
-    @Volatile private var armedMarkerKey: String? = null
-
-    private fun crashMarkerKey(modelPath: String, accel: String): String =
-        "${BuildConfig.LITERTLM_SDK_VERSION}|$accel|${File(modelPath).name}"
-
-    private fun armCrashMarker(modelPath: String, accel: String) {
-        if (accel == "CPU") return
-        val key = crashMarkerKey(modelPath, accel)
-        if (armedMarkerKey == key) return
-        // commit(), not apply(): a native fault can easily beat an async write to disk.
-        crashMarkers.edit().putBoolean(key, true).commit()
-        armedMarkerKey = key
-    }
-
-    private fun disarmCrashMarker() {
-        val key = armedMarkerKey ?: return
-        armedMarkerKey = null
-        crashMarkers.edit().remove(key).commit()
-    }
-
-    private fun crashedPreviously(modelPath: String, accel: String): Boolean =
-        accel != "CPU" && crashMarkers.getBoolean(crashMarkerKey(modelPath, accel), false)
-
-    /**
-     * Explicit user-requested GPU retry. Clears durable GPU crash guards only, across
-     * model files and SDK versions. Caller must also reset the persisted accelerator
-     * decision: otherwise a previously cached CPU fallback will still win next launch.
-     *
-     * The current Engine / Conversation is left untouched. The mutex prevents clearing
-     * the marker in the middle of a generation (which would hide a fresh native crash).
-     * A future GPU attempt will arm the marker again before entering JNI.
-     */
-    suspend fun clearGpuCrashMarkers(): Int = mutex.withLock {
-        val keys = crashMarkers.all.keys.filter { key ->
-            key.split('|').getOrNull(1) == "GPU"
-        }
-        if (keys.isEmpty()) return@withLock 0
-        val editor = crashMarkers.edit()
-        keys.forEach { editor.remove(it) }
-        check(editor.commit()) { "无法保存 GPU 崩溃记录的清除结果" }
-        if (armedMarkerKey?.let { it in keys } == true) armedMarkerKey = null
-        android.util.Log.i("LiteRtRuntime", "clearGpuCrashMarkers: removed ${keys.size} GPU markers")
-        keys.size
-    }
+    // Box-style backend selection is per model and explicit: no inferred CPU fallback,
+    // process-level backend cache, or persistent native-crash blacklisting.
 
     // ---- Idle teardown ----
     //
@@ -438,31 +370,21 @@ class LiteRtRuntime(private val context: Context) {
      * Pre-initialize only the model Engine. A real request creates the Conversation with
      * its exact system instruction, sampler settings and native tool declarations.
      * Shares [mutex] with ensureLoaded/streamTurns to avoid duplicate initialization.
-     * All failures remain best-effort: normal generation still has its original fallback.
+     * Preload errors are best-effort; normal generation will report them to the caller.
      */
     @OptIn(ExperimentalApi::class)
     suspend fun preloadEngine(
         modelPath: String,
-        preferredAccel: String? = null,
-        forceCpu: Boolean = false,
+        preferredAccel: String = "GPU",
         maxNumTokens: Int = 4096,
         supportImage: Boolean = false,
         supportAudio: Boolean = false,
         visionAccelerator: String = "gpu",
     ): PreloadResult = mutex.withLock {
-        val requestedAccel = if (forceCpu) "CPU"
-            else sessionFallbackAccelerator ?: preferredAccel ?: AcceleratorProbe.probeLiteRt(context)
-        val skippedCrash = crashedPreviously(modelPath, requestedAccel)
-        val accel = if (skippedCrash) {
-            sessionFallbackAccelerator = "CPU"
-            "CPU"
-        } else requestedAccel
-        val initialNote = when {
-            forceCpu -> "强制 CPU 模式"
-            skippedCrash -> "$requestedAccel 此前发生原生崩溃，已跳过并使用 CPU"
-            sessionFallbackAccelerator == "CPU" -> "沿用此前自动回退的 CPU"
-            else -> null
+        require(preferredAccel in setOf("CPU", "GPU", "NPU")) {
+            "Unsupported LiteRT backend: $preferredAccel"
         }
+        val accel = preferredAccel
         // Provider currently uses speculativeDecoding=false for all models.
         val key = EngineKey(
             modelPath = modelPath,
@@ -502,44 +424,24 @@ class LiteRtRuntime(private val context: Context) {
         val fileSupportsSpec = try {
             Capabilities(modelPath).use { it.hasSpeculativeDecodingSupport() }
         } catch (_: Throwable) { false }
-        val attempts = buildList {
-            add(key)
-            if (supportImage) add(key.copy(supportImage = false))
-            if (accel != "CPU") {
-                add(key.copy(accelerator = "CPU"))
-                if (supportImage) add(key.copy(accelerator = "CPU", supportImage = false))
-            }
-        }
-        for (candidate in attempts) {
-            try {
-                armCrashMarker(modelPath, candidate.accelerator)
-                val engine = createEngineWithBackend(candidate, candidate.accelerator)
-                // Successful Engine init is not a completed GPU inference. Disarm while
-                // parked idle; real generation re-arms before creating a Conversation.
-                disarmCrashMarker()
-                if (candidate.accelerator != accel) {
-                    sessionFallbackAccelerator = candidate.accelerator
-                }
-                preloaded = PreloadedEngine(
-                    engineKey = candidate,
-                    engine = engine,
-                    fileSupportsSpeculativeDecoding = fileSupportsSpec,
-                    speculativeDecodingEngaged = false,
-                    backendNote = if (candidate.accelerator != accel) {
-                        "$accel 初始化失败，已自动回退 ${actualBackendName(candidate.accelerator)}"
-                    } else initialNote,
-                )
-                publishBackendStatus()
-                android.util.Log.i(
-                    "LiteRtRuntime",
-                    "preloadEngine: ready ${File(modelPath).name}, ${candidate.accelerator}, " +
-                        "${candidate.maxNumTokens} tokens (conversation deferred)",
-                )
-                armIdleTeardown()
-                return@withLock PreloadResult.READY
-            } catch (t: Throwable) {
-                android.util.Log.w("LiteRtRuntime", "preloadEngine: ${candidate.accelerator} failed", t)
-            }
+        try {
+            val engine = createEngineWithBackend(key, accel)
+            preloaded = PreloadedEngine(
+                engineKey = key,
+                engine = engine,
+                fileSupportsSpeculativeDecoding = fileSupportsSpec,
+                speculativeDecodingEngaged = false,
+            )
+            publishBackendStatus()
+            android.util.Log.i(
+                "LiteRtRuntime",
+                "preloadEngine: ready ${File(modelPath).name}, $accel, " +
+                    "$maxNumTokens tokens (conversation deferred)",
+            )
+            armIdleTeardown()
+            return@withLock PreloadResult.READY
+        } catch (t: Throwable) {
+            android.util.Log.w("LiteRtRuntime", "preloadEngine: $accel failed", t)
         }
         // Do not prevent the normal generation path from retrying and reporting errors.
         PreloadResult.FAILED
@@ -563,12 +465,7 @@ class LiteRtRuntime(private val context: Context) {
         }
     }
 
-    /**
-     * Inspect a raw engine throwable and re-wrap it as [LiteRtModelCorruptException] if the
-     * error message indicates a structural file problem that won't be fixed by switching
-     * accelerators or retrying. Returns the original throwable unchanged for transient /
-     * hardware errors so the GPU→CPU fallback still works.
-     */
+    /** Classify native initialization errors without changing the selected backend. */
     private fun classifyEngineError(modelPath: String, t: Throwable): Throwable {
         // Walk the cause chain — the SDK's native exception is typically the innermost
         // cause; surrounding wrappers add their own (less specific) messages.
@@ -611,8 +508,7 @@ class LiteRtRuntime(private val context: Context) {
      * When only the ConversationKey changed (system instruction / sampler), the Engine is
      * kept but the Conversation is recreated and [LoadedModel.processed] is cleared.
      *
-     * When the preferred/probed accelerator fails (e.g. GPU OpenCL/OpenGL stack absent),
-     * automatically retries with CPU. The fallback is remembered in-session.
+     * If the selected backend fails, report the error without changing the backend.
      *
      * Returns the resolved accelerator label that was actually used.
      */
@@ -620,8 +516,7 @@ class LiteRtRuntime(private val context: Context) {
     suspend fun ensureLoaded(
         modelPath: String,
         requestId: String,
-        preferredAccel: String? = null,
-        forceCpu: Boolean = false,
+        preferredAccel: String = "GPU",
         maxNumTokens: Int = 4096,
         supportImage: Boolean = false,
         supportAudio: Boolean = false,
@@ -637,32 +532,10 @@ class LiteRtRuntime(private val context: Context) {
         topP: Double = 0.95,
         temperature: Double = 1.0,
     ): LoadOutcome = mutex.withLock {
-        // Use in-session fallback if a prior GPU→CPU retry already succeeded this session.
-        // forceCpu wins over a non-null preferredAccel.
-        val requestedAccel = if (forceCpu) "CPU"
-        else sessionFallbackAccelerator
-            ?: preferredAccel
-            ?: AcceleratorProbe.probeLiteRt(context)
-        // A prior run on this accelerator took the process down mid-inference. There is no
-        // safe way to retry it, so stay on CPU until the SDK version changes.
-        val skippedCrash = crashedPreviously(modelPath, requestedAccel)
-        val accel = if (skippedCrash) {
-            android.util.Log.w(
-                "LiteRtRuntime",
-                "ensureLoaded: $requestedAccel crashed the process on a previous run for " +
-                    "${File(modelPath).name} (SDK ${BuildConfig.LITERTLM_SDK_VERSION}); using CPU",
-            )
-            sessionFallbackAccelerator = "CPU"
-            "CPU"
-        } else {
-            requestedAccel
+        require(preferredAccel in setOf("CPU", "GPU", "NPU")) {
+            "Unsupported LiteRT backend: $preferredAccel"
         }
-        val initialNote = when {
-            forceCpu -> "强制 CPU 模式"
-            skippedCrash -> "$requestedAccel 此前发生原生崩溃，已跳过并使用 CPU"
-            sessionFallbackAccelerator == "CPU" -> "沿用此前自动回退的 CPU"
-            else -> null
-        }
+        val accel = preferredAccel
 
         // Probe the file for speculative-decoding support BEFORE building the engine.
         val supportsSpeculativeDecoding = try {
@@ -740,13 +613,9 @@ class LiteRtRuntime(private val context: Context) {
         // The request's actual tools, system instruction and sampling config are known
         // only now, so create the Conversation here, never during preload.
         preloaded?.let { staged ->
-            if (staged.engineKey == desiredEngineKey ||
-                (desiredEngineKey.supportImage && !staged.engineKey.supportImage &&
-                    staged.engineKey.copy(supportImage = true) == desiredEngineKey)
-            ) {
+            if (staged.engineKey == desiredEngineKey) {
                 preloaded = null
                 try {
-                    armCrashMarker(modelPath, accel)
                     val conv = createConversationWithFlags(
                         staged.engine,
                         acceleratorToBackend(staged.engineKey.accelerator),
@@ -769,15 +638,14 @@ class LiteRtRuntime(private val context: Context) {
                     return@withLock LoadOutcome(
                         accelerator = staged.engineKey.accelerator,
                         visionEnabled = staged.engineKey.supportImage,
-                        visionFellBackToTextOnly = desiredEngineKey.supportImage &&
-                            !staged.engineKey.supportImage,
+                        visionFellBackToTextOnly = false,
                         fileSupportsSpeculativeDecoding = staged.fileSupportsSpeculativeDecoding,
                         speculativeDecodingEngaged = staged.speculativeDecodingEngaged,
                     )
                 } catch (t: Throwable) {
                     try { staged.engine.close() } catch (_: Throwable) {}
                     publishBackendStatus()
-                    android.util.Log.w("LiteRtRuntime", "preloaded Engine conversation failed; normal load retry", t)
+                    android.util.Log.w("LiteRtRuntime", "preloaded Conversation failed; retrying the same backend", t)
                 }
             } else {
                 // Settings/model changed during the background load; discard stale Engine.
@@ -793,118 +661,12 @@ class LiteRtRuntime(private val context: Context) {
         loaded = null
         publishBackendStatus()
 
-        // Try the preferred accelerator first; fall back to CPU if it isn't already CPU.
-        // Arm the durable marker first: engine init is one of the two places a broken GPU
-        // delegate can fault, and a fault here leaves nothing for the runCatching to see.
-        armCrashMarker(modelPath, accel)
-        val firstAttempt = runCatching {
+        // Match Box: load ONLY the backend explicitly selected for this model.
+        // A failure is propagated to the provider; never retry on CPU or persist CPU.
+        val loadResult = try {
             tryLoadWithBackend(desiredEngineKey, accel, desiredConversationSpec)
-        }
-        val loadResult = firstAttempt.getOrElse { firstError ->
-            val classified = classifyEngineError(modelPath, firstError)
-            // Vision executor failed (typically Adreno 7xx + OEM linker namespace blocking
-            // libvndksupport.so → OpenCL discovery fails → OpenGL fallback hits the 0.11
-            // `CreateSharedMemoryManager` UNIMPLEMENTED stub; upstream issue #2292). The
-            // text path is fine on this device, so retry once with the vision backend off.
-            // The provider catches the typed exception we surface after the retry and
-            // persists the "vision unavailable" flag so subsequent loads skip the doomed
-            // GPU vision attempt entirely.
-            if (classified is LiteRtVisionUnavailableException && desiredEngineKey.supportImage) {
-                android.util.Log.w(
-                    "LiteRtRuntime",
-                    "Vision executor failed on $accel (${firstError.message}); " +
-                        "retrying without vision backend (text-only)",
-                )
-                val textOnlyKey = desiredEngineKey.copy(supportImage = false)
-                try {
-                    tryLoadWithBackend(textOnlyKey, accel, desiredConversationSpec).also {
-                        // The retry succeeded text-only — record this on the LoadedModel
-                        // so the provider can see it via the resolved engine key and
-                        // persist the per-model decision. We still throw a typed signal
-                        // up after the LoadedModel is committed, see below.
-                    }
-                } catch (retryError: Throwable) {
-                    // Text-only retry ALSO failed → the model just won't load on this
-                    // device. Surface the original vision-unavailable error so the
-                    // user message names the right root cause.
-                    throw classifyEngineError(
-                        modelPath,
-                        RuntimeException(
-                            "LiteRT engine could not load this model even with vision " +
-                                "disabled. Underlying: ${retryError.message}",
-                            retryError,
-                        )
-                    )
-                }
-            } else if (accel == "CPU") {
-                throw classifyEngineError(
-                    modelPath,
-                    RuntimeException(
-                        "LiteRT engine could not load this model on this device's GPU OR CPU. " +
-                        "This usually means the model file is packaged for a different runtime version. " +
-                        "Try a different model from the Gallery allowlist (tap Install default, or " +
-                        "paste a litert-community/ HuggingFace URL). " +
-                        "Underlying: ${firstError.message}",
-                        firstError,
-                    )
-                )
-            } else {
-                if (classified is LiteRtModelCorruptException) throw classified
-
-                android.util.Log.w(
-                    "LiteRtRuntime",
-                    "Engine init failed on $accel (${firstError.message}); retrying on CPU",
-                )
-                try {
-                    tryLoadWithBackend(
-                        desiredEngineKey.copy(accelerator = "CPU"),
-                        "CPU",
-                        desiredConversationSpec,
-                    )
-                } catch (cpuError: Throwable) {
-                    val cpuClassified = classifyEngineError(modelPath, cpuError)
-                    // Vision-side error even on CPU main backend → text-only retry too.
-                    if (cpuClassified is LiteRtVisionUnavailableException &&
-                        desiredEngineKey.supportImage
-                    ) {
-                        android.util.Log.w(
-                            "LiteRtRuntime",
-                            "Vision executor failed on CPU too; retrying without vision backend",
-                        )
-                        val textOnlyCpuKey = desiredEngineKey
-                            .copy(accelerator = "CPU", supportImage = false)
-                        try {
-                            tryLoadWithBackend(textOnlyCpuKey, "CPU", desiredConversationSpec)
-                        } catch (lastError: Throwable) {
-                            throw classifyEngineError(
-                                modelPath,
-                                RuntimeException(
-                                    "LiteRT engine could not load this model on this device " +
-                                        "even with vision disabled. Underlying: ${lastError.message}",
-                                    lastError,
-                                )
-                            )
-                        }
-                    } else {
-                        throw classifyEngineError(
-                            modelPath,
-                            RuntimeException(
-                                "LiteRT engine could not load this model on this device's GPU OR CPU. " +
-                                "This usually means the model file is packaged for a different runtime version. " +
-                                "Try a different model from the Gallery allowlist (tap Install default, or " +
-                                "paste a litert-community/ HuggingFace URL). " +
-                                "Underlying: ${cpuError.message}",
-                                cpuError,
-                            )
-                        )
-                    }
-                }
-            }
-        }
-
-        // If we fell back to CPU from a non-CPU accelerator, cache that decision in-session.
-        if (loadResult.accelerator != accel) {
-            sessionFallbackAccelerator = loadResult.accelerator
+        } catch (t: Throwable) {
+            throw classifyEngineError(modelPath, t)
         }
 
         loaded = LoadedModel(
@@ -918,9 +680,7 @@ class LiteRtRuntime(private val context: Context) {
             conversation = loadResult.conversation,
             fileSupportsSpeculativeDecoding = supportsSpeculativeDecoding,
             speculativeDecodingEngaged = effectiveSpeculativeDecoding,
-            backendNote = if (loadResult.accelerator != accel) {
-                "$accel 初始化失败，已自动回退 ${actualBackendName(loadResult.accelerator)}"
-            } else initialNote,
+            backendNote = null,
             pendingStreamOwner = requestId,
         )
         publishBackendStatus()
@@ -933,7 +693,7 @@ class LiteRtRuntime(private val context: Context) {
         LoadOutcome(
             accelerator = loadResult.accelerator,
             visionEnabled = loadResult.supportImage,
-            visionFellBackToTextOnly = desiredEngineKey.supportImage && !loadResult.supportImage,
+            visionFellBackToTextOnly = false,
             fileSupportsSpeculativeDecoding = supportsSpeculativeDecoding,
             speculativeDecodingEngaged = effectiveSpeculativeDecoding,
         )
@@ -943,19 +703,14 @@ class LiteRtRuntime(private val context: Context) {
         val engine: Engine,
         val conversation: Conversation,
         val accelerator: String,
-        /** The resolved supportImage value (may differ from the requested value when the
-         *  runtime had to fall back to text-only after the vision executor failed). */
+        /** Matches the model's explicit vision setting; no text-only init fallback. */
         val supportImage: Boolean,
     )
 
     /**
-     * Result returned by [ensureLoaded]. Tells the caller (a) which accelerator the engine
-     * ended up on, (b) whether the vision encoder is live or had to be dropped to
-     * text-only mode to get the model loaded, and (c) whether speculative decoding was
-     * available on the file and engaged for this load. The provider persists
-     * [visionFellBackToTextOnly] so future loads skip the doomed GPU vision attempt; the
-     * Doctor uses the speculative-decoding fields to surface a regression (file capability
-     * vanishing after an SDK bump) visibly.
+     * Result returned by [ensureLoaded]: the selected accelerator and engine capabilities.
+     * [visionFellBackToTextOnly] remains for caller compatibility but is always false in
+     * Box-style mode: an initialization failure no longer changes backend or modalities.
      */
     data class LoadOutcome(
         val accelerator: String,
@@ -1218,7 +973,6 @@ class LiteRtRuntime(private val context: Context) {
             // The other place a broken GPU delegate faults: it can survive engine init and
             // only die once real work is submitted. Re-arm for every turn; the first token
             // below disarms.
-            armCrashMarker(instance.engineKey.modelPath, instance.engineKey.accelerator)
             // Build Contents in Gallery's order: images and audio first, text last.
             val contentList = mutableListOf<Content>()
             for (image in images) contentList.add(Content.ImageBytes(image.toPngByteArray()))
@@ -1228,7 +982,6 @@ class LiteRtRuntime(private val context: Context) {
             // Set once the SDK reports the generation finished (either way). Read from the
             // flow's coroutine in awaitClose to tell a natural end from a cancellation.
             val generationFinished = java.util.concurrent.atomic.AtomicBoolean(false)
-            var firstMessageSeen = false
             val responseBuilder = StringBuilder()
             // How many of the message's tool calls have already been forwarded. The SDK
             // re-delivers the full list on each callback, so forward only the new tail.
@@ -1240,12 +993,6 @@ class LiteRtRuntime(private val context: Context) {
                 Contents.of(contentList),
                 object : MessageCallback {
                     override fun onMessage(message: Message) {
-                        if (!firstMessageSeen) {
-                            firstMessageSeen = true
-                            // The accelerator got through init and prefill and produced a
-                            // token, so it is not the one that kills the process.
-                            disarmCrashMarker()
-                        }
                         message.channels["thought"]?.let { thinking ->
                             if (thinking.isNotEmpty()) onThinking?.invoke(thinking)
                         }
@@ -1358,11 +1105,8 @@ class LiteRtRuntime(private val context: Context) {
             publishBackendStatus()
             // The normal chat Engine always starts with this flag off.
             ExperimentalFlags.enableBenchmark = false
-            // Preserve the existing native-crash recovery on the benchmark GPU path.
-            armCrashMarker(modelPath, accelerator)
             return block()
         } finally {
-            disarmCrashMarker()
             mutex.unlock()
         }
     }
