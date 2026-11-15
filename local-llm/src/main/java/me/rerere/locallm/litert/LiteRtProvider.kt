@@ -321,6 +321,24 @@ class LiteRtProvider(
             )
         }
         val turns = trimmed.map { it.toTurn() }
+        // The final ASSISTANT message contains the host's executed tool parts.
+        // Preserve call ids and arguments for exact matching against SDK tool calls.
+        // Earlier tool parts in the same assistant turn are harmless: the runtime only
+        // selects ids from the currently pending batch.
+        val toolResults = trimmed.lastOrNull()
+            ?.takeIf { it.role == MessageRole.ASSISTANT }
+            ?.parts?.filterIsInstance<UIMessagePart.Tool>()
+            ?.filter { it.isExecuted }
+            ?.mapNotNull { part ->
+                val rawText = part.output.filterIsInstance<UIMessagePart.Text>()
+                    .joinToString("") { it.text }
+                if (rawText.isBlank()) null else RuntimeToolResult(
+                    id = part.toolCallId,
+                    name = part.toolName,
+                    argumentsJson = part.input.ifBlank { "{}" },
+                    output = compactLocalToolOutput(part.toolName, rawText),
+                )
+            }.orEmpty()
 
         // Log actual prompt byte usage. The heuristic budget is intentionally conservative:
         // LiteRT-LM does not expose an exact prompt-token counter through this API.
@@ -461,6 +479,7 @@ class LiteRtProvider(
                     requestId = requestId,
                     history = turns,
                     coldBlob = coldBlob,
+                    toolResults = toolResults,
                     images = turnImages,
                     audioClips = turnAudio,
                 ).collect { event ->
@@ -487,16 +506,14 @@ class LiteRtProvider(
                         }
 
                         is StreamEvent.ToolCalls -> {
-                            // Republish as ordinary tool parts. GenerationHandler picks these
-                            // up and runs its HARDLINE -> approval -> timeout pipeline, then
-                            // re-invokes this provider with the results in the history. The
-                            // SDK gives no call id, so mint one that is unique within the
-                            // stream. GenerationHandler matches parts by it.
+                            // IDs are minted by the runtime and retained until RikkaHub
+                            // finishes approval/execution. This allows a later native
+                            // Message.tool response to match exactly the original call.
                             event.calls.forEach { call ->
-                                val id = "$streamId-tool-${toolCallCount++}"
-                                Log.i(TAG, "model requested tool '${call.name}' (id=$id)")
-                                emit(StreamChunk.ToolCallStart(id = id, toolName = call.name))
-                                emit(StreamChunk.ToolCallDelta(id = id, inputDelta = call.argumentsJson))
+                                toolCallCount++
+                                Log.i(TAG, "model requested tool '${call.name}' (id=${call.id})")
+                                emit(StreamChunk.ToolCallStart(id = call.id, toolName = call.name))
+                                emit(StreamChunk.ToolCallDelta(id = call.id, inputDelta = call.argumentsJson))
                             }
                         }
                     }

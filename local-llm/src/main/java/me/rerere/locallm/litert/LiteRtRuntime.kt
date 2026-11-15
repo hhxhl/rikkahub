@@ -19,6 +19,7 @@ import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.ModelInfo
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ToolProvider
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -79,7 +80,52 @@ data class Turn(val role: String, val rawText: String) {
  * have to depend on litertlm types. [argumentsJson] is the arguments object serialised back
  * to a JSON string, matching the `input` field of `UIMessagePart.Tool`.
  */
-data class RuntimeToolCall(val name: String, val argumentsJson: String)
+data class RuntimeToolCall(val id: String, val name: String, val argumentsJson: String)
+
+/** Executed by RikkaHub (including approval/denial), not by LiteRT-LM. */
+data class RuntimeToolResult(
+    val id: String,
+    val name: String,
+    val argumentsJson: String,
+    val output: String,
+)
+
+/** SDK tool calls awaiting their corresponding host-approved results. */
+internal data class PendingToolBatch(
+    val anchorSignatures: List<String>,
+    val calls: List<RuntimeToolCall>,
+)
+
+/**
+ * Match executed host results to the *exact* SDK calls from the preceding generation.
+ * Call ids matter: two invocations of the same function must not be confused. Fail
+ * closed on edits, partial approvals, duplicate ids or argument changes.
+ */
+internal fun matchNativeToolResults(
+    pending: PendingToolBatch?,
+    history: List<Turn>,
+    supplied: List<RuntimeToolResult>,
+): List<RuntimeToolResult>? {
+    if (pending == null || pending.calls.isEmpty() || history.lastOrNull()?.role != ROLE_ASSISTANT) return null
+    if (history.dropLast(1).map { it.signature } != pending.anchorSignatures) return null
+    if (supplied.map { it.id }.distinct().size != supplied.size) return null
+    val byId = supplied.associateBy { it.id }
+    return pending.calls.map { call ->
+        val result = byId[call.id] ?: return null
+        if (call.name != result.name || !sameToolArguments(call.argumentsJson, result.argumentsJson)) return null
+        if (result.output.isBlank()) return null
+        result
+    }
+}
+
+private fun sameToolArguments(a: String, b: String): Boolean = runCatching {
+    Json.parseToJsonElement(a) == Json.parseToJsonElement(b)
+}.getOrDefault(false)
+
+/** Use the public 0.19.1 TOOL-role API; no hand-written <tool_result> wrappers. */
+internal fun nativeToolResponseMessage(results: List<RuntimeToolResult>): Message = Message.tool(
+    Contents.of(results.map { Content.ToolResponse(it.name, it.output) })
+)
 
 /**
  * What [LiteRtRuntime.streamTurns] emits.
@@ -373,6 +419,8 @@ class LiteRtRuntime(
         var pristineConversation: Boolean = true,
         /** Prefix already installed in a pristine Conversation via initialMessages. */
         var initialHistorySignatures: List<String> = emptyList(),
+        /** Non-null only after the SDK surfaced tool calls and the host has yet to return results. */
+        var pendingToolBatch: PendingToolBatch? = null,
         /** Set after ensureLoaded until streamTurns begins: protects that gap from a
          *  model-selection preload closing the Engine before its actual request starts. */
         var pendingStreamOwner: String? = null,
@@ -638,6 +686,7 @@ class LiteRtRuntime(
             current.conversationKey = desiredConversationKey
             current.conversationSpec = desiredConversationSpec
             current.processed.clear()
+            current.pendingToolBatch = null
             current.pristineConversation = true
             current.pendingStreamOwner = requestId
             return@withLock LoadOutcome(
@@ -931,6 +980,7 @@ class LiteRtRuntime(
             initialMessages = initialMessages,
         )
         instance.pristineConversation = true
+        instance.pendingToolBatch = null
         instance.initialHistorySignatures = emptyList() // overwritten by streamTurns for native cold
     }
 
@@ -959,6 +1009,7 @@ class LiteRtRuntime(
         requestId: String,
         history: List<Turn>,
         coldBlob: String,
+        toolResults: List<RuntimeToolResult> = emptyList(),
         images: List<Bitmap> = emptyList(),
         audioClips: List<ByteArray> = emptyList(),
         onThinking: ((String) -> Unit)? = null,
@@ -1001,14 +1052,26 @@ class LiteRtRuntime(
                 "LiteRT request was superseded before generation started; retry this turn"
             }
             instance.pendingStreamOwner = null
+            // The host has finished approval/execution and returned the tool outputs.
+            // Continue the SAME Conversation with a real TOOL-role message only when the
+            // exact pending call ids, arguments and unchanged conversation prefix match.
+            // Otherwise use the existing Cold recovery path (edits/retries/reloads).
+            val nativeToolResults = if (!hasMedia) {
+                matchNativeToolResults(instance.pendingToolBatch, history, toolResults)
+            } else null
             val planned = planTurns(instance.processed, historySignatures, hasMedia)
-            // Only a newly appended USER can be submitted to the SDK as a user message.
-            // A tool-result update can end in ASSISTANT and must not use the warm path.
+            // Only a newly appended USER can be submitted as a user message.
             val plan = if (planned is TurnPlan.Warm &&
                 history[planned.sendFromIndex].role != ROLE_USER
             ) TurnPlan.Cold else planned
 
-            val inputText: String = when (plan) {
+            val inputText: String = if (nativeToolResults != null) {
+                android.util.Log.i(
+                    "LiteRtRuntime",
+                    "streamTurns: native TOOL continuation, responses=${nativeToolResults.size}",
+                )
+                ""
+            } else when (plan) {
                 is TurnPlan.Warm -> {
                     android.util.Log.d("LiteRtRuntime", "streamTurns: Warm append")
                     history[plan.sendFromIndex].rawText
@@ -1049,6 +1112,14 @@ class LiteRtRuntime(
             for (image in images) contentList.add(Content.ImageBytes(image.toPngByteArray()))
             for (clip in audioClips) contentList.add(Content.AudioBytes(clip))
             if (inputText.trim().isNotEmpty()) contentList.add(Content.Text(inputText))
+            val inputMessage = if (nativeToolResults != null) {
+                nativeToolResponseMessage(nativeToolResults)
+            } else {
+                Message.user(Contents.of(contentList))
+            }
+            // Consumed (or invalidated) before sending: a failed/cancelled call may not
+            // replay the same results into a partially-mutated native Conversation.
+            instance.pendingToolBatch = null
 
             // Set once the SDK reports the generation finished (either way). Read from the
             // flow's coroutine in awaitClose to tell a natural end from a cancellation.
@@ -1059,11 +1130,12 @@ class LiteRtRuntime(
             // How many of the message's tool calls have already been forwarded. The SDK
             // re-delivers the full list on each callback, so forward only the new tail.
             var emittedToolCalls = 0
+            val requestedTools = mutableListOf<RuntimeToolCall>()
             // From this point onward native state may have changed, even if a send
             // throws or the user cancels before the first token arrives.
             instance.pristineConversation = false
             conv.sendMessageAsync(
-                Contents.of(contentList),
+                inputMessage,
                 object : MessageCallback {
                     override fun onMessage(message: Message) {
                         message.channels["thought"]?.let { thinking ->
@@ -1076,13 +1148,15 @@ class LiteRtRuntime(
                         }
                         val calls = message.toolCalls
                         if (calls.size > emittedToolCalls) {
-                            val fresh = calls.drop(emittedToolCalls).map { call ->
+                            val fresh = calls.drop(emittedToolCalls).mapIndexed { i, call ->
                                 RuntimeToolCall(
+                                    id = "litert-$requestId-tool-${emittedToolCalls + i}",
                                     name = call.name,
                                     argumentsJson = argumentsToJson(call.arguments),
                                 )
                             }
                             emittedToolCalls = calls.size
+                            requestedTools.addAll(fresh)
                             trySend(StreamEvent.ToolCalls(fresh))
                         }
                     }
@@ -1094,8 +1168,19 @@ class LiteRtRuntime(
                         // safe: the mutex is held for this whole streamTurns invocation.
                         instance.processed.clear()
                         if (!cancellationRequested.get()) {
-                            instance.processed.addAll(historySignatures)
-                            instance.processed.add(turnSignature(ROLE_ASSISTANT, fullResponse))
+                            // Native tool replies are appended to the existing assistant
+                            // message in RikkaHub, not emitted as an independent turn.
+                            // The SDK/cache signatures therefore cannot be assumed equal.
+                            if (nativeToolResults == null) {
+                                instance.processed.addAll(historySignatures)
+                                instance.processed.add(turnSignature(ROLE_ASSISTANT, fullResponse))
+                            }
+                            if (requestedTools.isNotEmpty()) {
+                                val anchor = if (history.lastOrNull()?.role == ROLE_ASSISTANT) {
+                                    historySignatures.dropLast(1)
+                                } else historySignatures
+                                instance.pendingToolBatch = PendingToolBatch(anchor, requestedTools.toList())
+                            }
                         }
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
@@ -1105,6 +1190,7 @@ class LiteRtRuntime(
                     override fun onError(throwable: Throwable) {
                         // The KV-cache state is now unknown — force the next turn cold.
                         instance.processed.clear()
+                        instance.pendingToolBatch = null
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
                         nativeFinished.complete(Unit)
@@ -1124,6 +1210,7 @@ class LiteRtRuntime(
                         runCatching { conv.cancelProcess() }
                             .onFailure { android.util.Log.w("LiteRtRuntime", "cancelProcess failed", it) }
                         instance.processed.clear()
+                        instance.pendingToolBatch = null
                     }
                 }
             } finally {

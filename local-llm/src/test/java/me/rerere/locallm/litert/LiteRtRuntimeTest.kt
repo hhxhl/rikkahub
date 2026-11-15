@@ -174,6 +174,56 @@ class LiteRtRuntimeTest {
         )
     }
 
+    // ---- Native TOOL response continuation ---------------------------------------
+
+    private val searchCall = RuntimeToolCall(
+        id = "sdk-tool-search",
+        name = "search_web",
+        argumentsJson = """{"query":"Android 17"}""",
+    )
+    private val timeCall = RuntimeToolCall(
+        id = "sdk-tool-time",
+        name = "get_time_info",
+        argumentsJson = "{}",
+    )
+
+    private val toolAnchor = listOf(Turn(ROLE_USER, "search and check the time"))
+    private val toolStep = toolAnchor + Turn(ROLE_ASSISTANT, "<tool_call>...<tool_result>...")
+
+    @Test
+    fun `native results require exact pending ids but allow earlier completed tool steps`() {
+        val batch = PendingToolBatch(toolAnchor.map { it.signature }, listOf(searchCall, timeCall))
+        val earlier = RuntimeToolResult("previous-id", "search_web", "{}", "previous output")
+        val time = RuntimeToolResult(timeCall.id, timeCall.name, "{}", "2026-11-16 05:02")
+        val search = RuntimeToolResult(searchCall.id, searchCall.name, """{ "query" : "Android 17" }""", "official URL")
+        assertEquals(listOf(search, time), matchNativeToolResults(batch, toolStep, listOf(earlier, time, search)))
+    }
+
+    @Test
+    fun `native tool response uses SDK TOOL role and preserves output text`() {
+        val results = listOf(RuntimeToolResult(searchCall.id, searchCall.name, searchCall.argumentsJson, "actual result"))
+        val message = nativeToolResponseMessage(results)
+        assertEquals(com.google.ai.edge.litertlm.Role.TOOL, message.role)
+        val content = message.contents.contents.single() as com.google.ai.edge.litertlm.Content.ToolResponse
+        assertEquals("search_web", content.name)
+        assertEquals("actual result", content.response)
+    }
+
+    @Test
+    fun `native results reject missing duplicate mismatched calls and changed history`() {
+        val batch = PendingToolBatch(toolAnchor.map { it.signature }, listOf(searchCall, timeCall))
+        val search = RuntimeToolResult(searchCall.id, searchCall.name, searchCall.argumentsJson, "search result")
+        val time = RuntimeToolResult(timeCall.id, timeCall.name, "{}", "time result")
+        assertEquals(null, matchNativeToolResults(batch, toolStep, listOf(search)))
+        assertEquals(null, matchNativeToolResults(batch, toolStep, listOf(search, search, time)))
+        assertEquals(null, matchNativeToolResults(batch, toolStep, listOf(search.copy(name = "scrape_web"), time)))
+        assertEquals(null, matchNativeToolResults(batch, toolStep, listOf(search.copy(argumentsJson = "{}"), time)))
+        assertEquals(null, matchNativeToolResults(batch, toolStep, listOf(search.copy(output = ""), time)))
+        assertEquals(null, matchNativeToolResults(batch, listOf(Turn(ROLE_USER, "edited"), toolStep.last()), listOf(search, time)))
+        assertEquals(null, matchNativeToolResults(batch, toolAnchor, listOf(search, time)))
+        assertEquals(null, matchNativeToolResults(null, toolStep, listOf(search, time)))
+    }
+
     // ---- isVisionExecutorError -----------------------------------------------------
 
     @Test
