@@ -35,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalContext
@@ -81,7 +82,7 @@ private fun LiteRtNumericSettingRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text("$title（$unit）", style = MaterialTheme.typography.titleSmall)
             Text(
                 description,
                 style = MaterialTheme.typography.bodySmall,
@@ -91,13 +92,15 @@ private fun LiteRtNumericSettingRow(
         OutlinedTextField(
             value = value,
             onValueChange = { onValueChange(it.filter(Char::isDigit)) },
-            placeholder = if (placeholder != null) { { Text(placeholder) } } else null,
+            placeholder = if (placeholder != null) {
+                { Text(placeholder, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.End) }
+            } else null,
             modifier = Modifier.width(100.dp),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(textAlign = TextAlign.End),
             singleLine = true,
             enabled = enabled,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         )
-        Text(unit, style = MaterialTheme.typography.bodySmall)
     }
 }
 
