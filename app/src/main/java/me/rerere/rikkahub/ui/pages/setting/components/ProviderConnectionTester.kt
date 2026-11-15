@@ -56,6 +56,7 @@ fun ProviderConnectionTester(
     internalProvider: ProviderSetting,
 ) {
     var showTestDialog by remember { mutableStateOf(false) }
+    var liteRtTestRunning by remember { mutableStateOf(false) }
     val providerManager = koinInject<ProviderManager>()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -124,10 +125,14 @@ fun ProviderConnectionTester(
                 TextButton(
                     onClick = {
                         if (model == null) return@TextButton
+                        // Only serialize LiteRT tests. Cloud providers still run all three concurrently.
+                        val isLiteRt = internalProvider is ProviderSetting.LiteRtLocal
+                        if (isLiteRt && liteRtTestRunning) return@TextButton
                         val provider = providerManager.getProviderByType(internalProvider)
+                        if (isLiteRt) liteRtTestRunning = true
                         resetStates()
                         scope.launch {
-                            launch {
+                            val nonStreamingJob = launch {
                                 runCatching {
                                     nonStreamingState = UiState.Loading
                                     val result = provider.generateText(
@@ -149,7 +154,8 @@ fun ProviderConnectionTester(
                                     nonStreamingState = UiState.Success(text)
                                 }.onFailure { nonStreamingState = UiState.Error(it) }
                             }
-                            launch {
+                            if (isLiteRt) nonStreamingJob.join()
+                            val streamingJob = launch {
                                 runCatching {
                                     streamingState = UiState.Loading
                                     val flow = provider.streamText(
@@ -173,7 +179,8 @@ fun ProviderConnectionTester(
                                     streamingState = UiState.Success("")
                                 }.onFailure { streamingState = UiState.Error(it) }
                             }
-                            launch {
+                            if (isLiteRt) streamingJob.join()
+                            val toolsJob = launch {
                                 runCatching {
                                     toolsState = UiState.Loading
                                     val testTool = Tool(
@@ -217,8 +224,13 @@ fun ProviderConnectionTester(
                                     toolsState = UiState.Success(resultText)
                                 }.onFailure { toolsState = UiState.Error(it) }
                             }
+                            if (isLiteRt) {
+                                toolsJob.join()
+                                liteRtTestRunning = false
+                            }
                         }
-                    }
+                    },
+                    enabled = internalProvider !is ProviderSetting.LiteRtLocal || !liteRtTestRunning,
                 ) {
                     Text(stringResource(R.string.setting_provider_page_test))
                 }
