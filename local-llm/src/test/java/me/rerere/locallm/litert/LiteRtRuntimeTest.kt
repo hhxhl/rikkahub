@@ -149,6 +149,31 @@ class LiteRtRuntimeTest {
         assertFalse(LiteRtRuntime.shouldDeferModelSwitch(pendingStream = false))
     }
 
+    @Test
+    fun `native Cold recovery preserves roles and excludes newest USER`() {
+        val history = listOf(
+            Turn(ROLE_USER, "hello"),
+            Turn(ROLE_ASSISTANT, "hi"),
+            Turn(ROLE_USER, "current question"),
+        )
+        val native = LiteRtRuntime.nativeInitialHistory(history)!!
+        assertEquals(2, native.size)
+        assertEquals(com.google.ai.edge.litertlm.Role.USER, native[0].role)
+        assertEquals(com.google.ai.edge.litertlm.Role.MODEL, native[1].role)
+        assertEquals("hello", native[0].toString())
+        assertEquals("hi", native[1].toString())
+    }
+
+    @Test
+    fun `tool continuation does not masquerade as a new USER`() {
+        assertEquals(
+            null,
+            LiteRtRuntime.nativeInitialHistory(
+                listOf(Turn(ROLE_USER, "find news"), Turn(ROLE_ASSISTANT, "<tool_result>ok</tool_result>")),
+            ),
+        )
+    }
+
     // ---- isVisionExecutorError -----------------------------------------------------
 
     @Test

@@ -151,3 +151,23 @@ class LiteRtModelFileTest {
         assertNull(LiteRtModelFile.readDeclaredMaxTokens(file))
     }
 }
+
+class LiteRtQwenVariantSamplerTest {
+    @org.junit.Test
+    fun `non-thinking exported qwen3 0_6b variant inherits qwen3 family sampler`() {
+        val config = LiteRtModelDefaults.forModelFile(
+            "qwen3_0.6b_nothink_q4_block32_ekv1280.litertlm"
+        )
+        org.junit.Assert.assertEquals(20, config.topK)
+        org.junit.Assert.assertEquals(0.95, config.topP, 0.0001)
+        org.junit.Assert.assertEquals(0.6, config.temperature, 0.0001)
+        org.junit.Assert.assertEquals(1280, config.maxContextLength)
+    }
+
+    @org.junit.Test
+    fun `unknown non-qwen file retains general sampler`() {
+        val config = LiteRtModelDefaults.forModelFile("other_ekv2048.litertlm")
+        org.junit.Assert.assertEquals(64, config.topK)
+        org.junit.Assert.assertEquals(1.0, config.temperature, 0.0001)
+    }
+}

@@ -24,7 +24,10 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,8 +67,8 @@ fun turnSignature(role: String, text: String): String = "$role|${text.length}|${
  *
  * [rawText] is the turn's content WITHOUT any "User:/Assistant:" markers — when this turn is
  * the single new turn appended to a warm Conversation, [rawText] is sent as-is and the SDK's
- * chat template applies the role wrapping (the same path Gallery uses). The marker-prefixed
- * cold blob is built separately by the provider for the rebuild-from-scratch path.
+ * chat template applies role wrapping. Cold USER turns restore earlier turns as native
+ * SDK Message.user/model items in ConversationConfig.initialMessages.
  */
 data class Turn(val role: String, val rawText: String) {
     val signature: String get() = turnSignature(role, rawText)
@@ -102,15 +105,14 @@ sealed interface TurnPlan {
      *  one new turn). The KV cache already holds every turn before [sendFromIndex]. */
     data class Warm(val sendFromIndex: Int) : TurnPlan
 
-    /** Recreate the Conversation (clearing the KV cache) and send the full cold blob. */
+    /** Recreate the Conversation and replay roles with initialMessages (or tool fallback). */
     data object Cold : TurnPlan
 }
 
 /**
  * Thrown when a `.litertlm` model file is structurally broken in a way that retrying
- * with a different accelerator won't fix (e.g. corrupt tokenizer data, invalid magic
- * number, schema mismatch). Callers should treat [modelPath] as permanently unloadable,
- * delete the file from disk, and remove it from the provider's models list.
+ * with a different accelerator might not fix (e.g. broken archive or schema mismatch).
+ * The caller must NOT delete the model file automatically: JNI diagnostics can be misleading.
  */
 class LiteRtModelCorruptException(
     val modelPath: String,
@@ -172,8 +174,9 @@ class LiteRtVisionUnavailableException(
  * compares the caller's full turn list against [LoadedModel.processed] (the signatures the
  * live Conversation has already consumed): a clean single-turn append reuses the warm KV
  * cache; anything else (a new chat, an edited/regenerated turn, a tool round-trip, a config
- * change) falls back to recreating the Conversation and re-sending the full history. The
- * cold path is always correct — the warm path is purely an optimisation, and a signature
+ * change) falls back to recreating the Conversation using SDK initialMessages for
+ * text turns. Non-user-ending tool continuations retain a compatibility text fallback.
+ * The warm path is an optimisation, and a signature
  * mismatch can only cost a cold reload, never produce wrong output.
  *
  * # Concurrency
@@ -368,6 +371,8 @@ class LiteRtRuntime(
         /** True only for a newly created Conversation that has never received tokens.
          *  An error/cancel makes this false even if [processed] is empty. */
         var pristineConversation: Boolean = true,
+        /** Prefix already installed in a pristine Conversation via initialMessages. */
+        var initialHistorySignatures: List<String> = emptyList(),
         /** Set after ensureLoaded until streamTurns begins: protects that gap from a
          *  model-selection preload closing the Engine before its actual request starts. */
         var pendingStreamOwner: String? = null,
@@ -556,11 +561,17 @@ class LiteRtRuntime(
         topK: Int = 64,
         topP: Double = 0.95,
         temperature: Double = 1.0,
+        /** Current user-ending history; initialMessages are used only for a new Conversation. */
+        initialTurnHistory: List<Turn> = emptyList(),
     ): LoadOutcome = mutex.withLock {
         require(preferredAccel in setOf("CPU", "GPU", "NPU")) {
             "Unsupported LiteRT backend: $preferredAccel"
         }
         val accel = preferredAccel
+        val nativeInitialMessages = nativeInitialHistory(initialTurnHistory).orEmpty()
+        val nativeInitialSignatures = if (initialTurnHistory.lastOrNull()?.role == ROLE_USER) {
+            initialTurnHistory.dropLast(1).map { it.signature }
+        } else emptyList()
 
         // Probe the file for speculative-decoding support BEFORE building the engine.
         val supportsSpeculativeDecoding = try {
@@ -621,7 +632,9 @@ class LiteRtRuntime(
                 engine = current.engine,
                 backend = acceleratorToBackend(current.engineKey.accelerator),
                 spec = desiredConversationSpec,
+                initialMessages = nativeInitialMessages,
             )
+            current.initialHistorySignatures = nativeInitialSignatures
             current.conversationKey = desiredConversationKey
             current.conversationSpec = desiredConversationSpec
             current.processed.clear()
@@ -647,6 +660,7 @@ class LiteRtRuntime(
                         staged.engine,
                         acceleratorToBackend(staged.engineKey.accelerator),
                         desiredConversationSpec,
+                        initialMessages = nativeInitialMessages,
                     )
                     loaded = LoadedModel(
                         engineKey = staged.engineKey,
@@ -657,6 +671,7 @@ class LiteRtRuntime(
                         fileSupportsSpeculativeDecoding = staged.fileSupportsSpeculativeDecoding,
                         speculativeDecodingEngaged = staged.speculativeDecodingEngaged,
                         backendNote = staged.backendNote,
+                        initialHistorySignatures = nativeInitialSignatures,
                         pendingStreamOwner = requestId,
                     )
                     publishBackendStatus()
@@ -691,7 +706,9 @@ class LiteRtRuntime(
         // Match Box: load ONLY the backend explicitly selected for this model.
         // A failure is propagated to the provider; never retry on CPU or persist CPU.
         val loadResult = try {
-            tryLoadWithBackend(desiredEngineKey, accel, desiredConversationSpec)
+            tryLoadWithBackend(
+                desiredEngineKey, accel, desiredConversationSpec, nativeInitialMessages,
+            )
         } catch (t: Throwable) {
             throw classifyEngineError(modelPath, t)
         }
@@ -708,6 +725,7 @@ class LiteRtRuntime(
             fileSupportsSpeculativeDecoding = supportsSpeculativeDecoding,
             speculativeDecodingEngaged = effectiveSpeculativeDecoding,
             backendNote = null,
+            initialHistorySignatures = nativeInitialSignatures,
             pendingStreamOwner = requestId,
         )
         publishBackendStatus()
@@ -764,6 +782,7 @@ class LiteRtRuntime(
         engineKey: EngineKey,
         accel: String,
         conversationSpec: ConversationSpec,
+        initialMessages: List<Message> = emptyList(),
     ): LoadResult {
         val engine = createEngineWithBackend(engineKey, accel)
         val conv = try {
@@ -771,6 +790,7 @@ class LiteRtRuntime(
                 engine = engine,
                 backend = acceleratorToBackend(accel),
                 spec = conversationSpec,
+                initialMessages = initialMessages,
             )
         } catch (t: Throwable) {
             try { engine.close() } catch (_: Throwable) {}
@@ -859,6 +879,7 @@ class LiteRtRuntime(
         engine: Engine,
         backend: Backend,
         spec: ConversationSpec,
+        initialMessages: List<Message> = emptyList(),
     ): Conversation {
         ExperimentalFlags.enableConversationConstrainedDecoding = spec.constrainedDecoding
         return try {
@@ -875,6 +896,7 @@ class LiteRtRuntime(
                         )
                     },
                     systemInstruction = spec.systemInstruction,
+                    initialMessages = initialMessages,
                     tools = spec.tools,
                     // Surface tool calls instead of dispatching them. The SDK would happily
                     // run them itself, but that path skips the host's approval prompt, the
@@ -897,14 +919,19 @@ class LiteRtRuntime(
 
     /** Close + rebuild the live Conversation in place, clearing its KV cache. Caller must
      *  hold [mutex] and must clear [LoadedModel.processed] itself. */
-    private fun recreateConversationLocked(instance: LoadedModel) {
+    private fun recreateConversationLocked(
+        instance: LoadedModel,
+        initialMessages: List<Message> = emptyList(),
+    ) {
         try { instance.conversation.close() } catch (_: Throwable) {}
         instance.conversation = createConversationWithFlags(
             engine = instance.engine,
             backend = acceleratorToBackend(instance.engineKey.accelerator),
             spec = instance.conversationSpec,
+            initialMessages = initialMessages,
         )
         instance.pristineConversation = true
+        instance.initialHistorySignatures = emptyList() // overwritten by streamTurns for native cold
     }
 
     /**
@@ -917,9 +944,9 @@ class LiteRtRuntime(
      *  - **Warm:** the cache holds everything except exactly one newly-appended turn → send
      *    only that turn's [Turn.rawText]; the SDK's chat template applies role wrapping and
      *    the prior turns are reused from the cache (Gallery's behaviour).
-     *  - **Cold:** anything else (first turn, config change, edited/regenerated history,
-     *    a tool round-trip, media inputs) → recreate the Conversation and send [coldBlob],
-     *    the caller's full marker-formatted render of the history.
+     *  - **Cold:** first turn, changed history, media or tool round-trip → recreate the
+     *    Conversation with real role-bearing initialMessages when the last turn is USER.
+     *    [coldBlob] remains the compatibility path for tool continuations ending ASSISTANT.
      *
      * Each emitted String is the **cumulative** response so far, NOT a delta — same contract
      * as Gallery's `partialResult`. Downstream consumers compute deltas themselves.
@@ -974,25 +1001,42 @@ class LiteRtRuntime(
                 "LiteRT request was superseded before generation started; retry this turn"
             }
             instance.pendingStreamOwner = null
-            val plan = planTurns(instance.processed, historySignatures, hasMedia)
+            val planned = planTurns(instance.processed, historySignatures, hasMedia)
+            // Only a newly appended USER can be submitted to the SDK as a user message.
+            // A tool-result update can end in ASSISTANT and must not use the warm path.
+            val plan = if (planned is TurnPlan.Warm &&
+                history[planned.sendFromIndex].role != ROLE_USER
+            ) TurnPlan.Cold else planned
 
             val inputText: String = when (plan) {
-                is TurnPlan.Warm -> history[plan.sendFromIndex].rawText
+                is TurnPlan.Warm -> {
+                    android.util.Log.d("LiteRtRuntime", "streamTurns: Warm append")
+                    history[plan.sendFromIndex].rawText
+                }
                 TurnPlan.Cold -> {
-                    // ensureLoaded may have kept a warm Conversation that this turn cannot
-                    // reuse (a /new, an edit, a regeneration, a tool round-trip, or media).
-                    // Recreate it to clear the KV cache, then send the full history.
-                    // The first request already owns a fresh Conversation from ensureLoaded.
-                    // Rebuilding it immediately wastes native Conversation/KV allocation.
-                    // An interrupted/error Conversation is NOT pristine and must be reset.
-                    if (shouldRecreateForCold(instance.pristineConversation)) {
-                        android.util.Log.d("LiteRtRuntime", "streamTurns: Cold rebuilt Conversation")
-                        recreateConversationLocked(instance)
+                    // Ordinary text conversations use the SDK's real message roles,
+                    // matching Gallery: old turns go into initialMessages; only the
+                    // newest USER turn is submitted through sendMessageAsync.
+                    // Non-user-ending agent/tool continuations retain the old fallback
+                    // until tool responses can be reconstructed as SDK ToolResponse.
+                    val nativeHistory = nativeInitialHistory(history)
+                    val nativeSignatures = if (nativeHistory != null) {
+                        history.dropLast(1).map { it.signature }
+                    } else emptyList()
+                    val canReusePristine = instance.pristineConversation &&
+                        instance.initialHistorySignatures == nativeSignatures
+                    if (!canReusePristine) {
+                        recreateConversationLocked(instance, nativeHistory.orEmpty())
+                        instance.initialHistorySignatures = nativeSignatures
+                        android.util.Log.i(
+                            "LiteRtRuntime",
+                            "streamTurns: Cold recreated; nativeHistory=${nativeHistory?.size ?: -1}",
+                        )
                     } else {
-                        android.util.Log.d("LiteRtRuntime", "streamTurns: Cold reused pristine Conversation")
+                        android.util.Log.d("LiteRtRuntime", "streamTurns: Cold pristine Conversation with matching prefix")
                     }
                     instance.processed.clear()
-                    coldBlob
+                    if (nativeHistory != null) history.last().rawText else coldBlob
                 }
             }
 
@@ -1009,6 +1053,8 @@ class LiteRtRuntime(
             // Set once the SDK reports the generation finished (either way). Read from the
             // flow's coroutine in awaitClose to tell a natural end from a cancellation.
             val generationFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+            val cancellationRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+            val nativeFinished = CompletableDeferred<Unit>()
             val responseBuilder = StringBuilder()
             // How many of the message's tool calls have already been forwarded. The SDK
             // re-delivers the full list on each callback, so forward only the new tail.
@@ -1047,10 +1093,13 @@ class LiteRtRuntime(
                         // if it is a clean single-turn append. Mutating [processed] here is
                         // safe: the mutex is held for this whole streamTurns invocation.
                         instance.processed.clear()
-                        instance.processed.addAll(historySignatures)
-                        instance.processed.add(turnSignature(ROLE_ASSISTANT, fullResponse))
+                        if (!cancellationRequested.get()) {
+                            instance.processed.addAll(historySignatures)
+                            instance.processed.add(turnSignature(ROLE_ASSISTANT, fullResponse))
+                        }
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
+                        nativeFinished.complete(Unit)
                         close()
                     }
                     override fun onError(throwable: Throwable) {
@@ -1058,32 +1107,50 @@ class LiteRtRuntime(
                         instance.processed.clear()
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
+                        nativeFinished.complete(Unit)
                         if (throwable is CancellationException) close() else close(throwable)
                     }
                 },
                 emptyMap(),
             )
-            awaitClose {
-                // Reached either because the SDK finished (the callbacks close the channel
-                // above) or because the collector went away first: the user hit stop, or
-                // the surface collecting this flow was torn down.
-                //
-                // In the second case the native generation is STILL RUNNING: it keeps the
-                // GPU busy writing into a channel nobody reads, and because the mutex is
-                // released as soon as this block returns, the next turn can call
-                // sendMessageAsync on a Conversation that has not finished the previous
-                // one. Cancel it so stopping actually stops.
-                if (!generationFinished.get()) {
-                    android.util.Log.i(
-                        "LiteRtRuntime",
-                        "stream cancelled before completion; cancelling native generation",
-                    )
-                    runCatching { conv.cancelProcess() }
-                        .onFailure {
-                            android.util.Log.w("LiteRtRuntime", "cancelProcess failed", it)
+            try {
+                awaitClose {
+                    // A cancelled collector must request native stop before another turn
+                    // can use the Engine. The callback is asynchronous, so the mutex must
+                    // remain held briefly while we await its completion acknowledgment.
+                    if (!generationFinished.get()) {
+                        cancellationRequested.set(true)
+                        android.util.Log.i("LiteRtRuntime", "stream cancelled; request native stop")
+                        runCatching { conv.cancelProcess() }
+                            .onFailure { android.util.Log.w("LiteRtRuntime", "cancelProcess failed", it) }
+                        instance.processed.clear()
+                    }
+                }
+            } finally {
+                if (cancellationRequested.get()) {
+                    withContext(NonCancellable) {
+                        val acknowledged = withTimeoutOrNull(1_500L) {
+                            nativeFinished.await()
+                            true
+                        } ?: false
+                        if (!acknowledged) {
+                            android.util.Log.w(
+                                "LiteRtRuntime",
+                                "native cancellation not acknowledged within 1500ms; next turn must rebuild",
+                            )
                         }
-                    // The KV cache now holds a partial turn, so the next turn must go cold.
-                    instance.processed.clear()
+                    }
+                } else if (generationFinished.get()) {
+                    // Token count is diagnostic only, and must run outside the native
+                    // onDone callback to avoid JNI re-entrancy on its worker thread.
+                    runCatching { conv.getTokenCount() }
+                        .onSuccess { count ->
+                            android.util.Log.i(
+                                "LiteRtRuntime",
+                                "streamTurns: kvTokens=$count/${instance.engineKey.maxNumTokens}",
+                            )
+                        }
+                        .onFailure { android.util.Log.d("LiteRtRuntime", "getTokenCount unavailable", it) }
                 }
             }
         } } finally {
@@ -1177,6 +1244,22 @@ class LiteRtRuntime(
          * Any "no" answer is [TurnPlan.Cold], which is always correct — the warm path is
          * purely an optimisation.
          */
+        /**
+         * SDK-native Cold recovery. The newest user input must NOT be in initialMessages:
+         * it is passed separately to sendMessageAsync and includes current-turn media.
+         * Null means this is an agent/tool continuation, not a fresh user turn.
+         */
+        internal fun nativeInitialHistory(history: List<Turn>): List<Message>? {
+            if (history.lastOrNull()?.role != ROLE_USER) return null
+            return history.dropLast(1).map { turn ->
+                when (turn.role) {
+                    ROLE_USER -> Message.user(turn.rawText)
+                    ROLE_ASSISTANT -> Message.model(turn.rawText)
+                    else -> throw IllegalArgumentException("Unexpected LiteRT turn role: ${turn.role}")
+                }
+            }
+        }
+
         internal fun shouldRecreateForCold(pristineConversation: Boolean): Boolean =
             !pristineConversation
 

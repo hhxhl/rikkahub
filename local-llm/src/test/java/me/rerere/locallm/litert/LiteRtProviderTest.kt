@@ -232,3 +232,32 @@ class LiteRtResponseReserveBudgetTest {
             LiteRtProvider.toolDeclarationByteBudget(4096, 300, 25))
     }
 }
+
+/** History trimming must preserve USER-led boundaries, not orphan earlier assistant turns. */
+class LiteRtHistoryTrimmingTest {
+    @Test
+    fun `drops a full old question and answer`() {
+        val entries = listOf("U:first", "A:old", "U:second", "A:new", "U:third")
+        assertEquals(
+            listOf("U:second", "A:new", "U:third"),
+            trimOldestConversationSegment(entries) { it.startsWith("U:") },
+        )
+    }
+
+    @Test
+    fun `keeps latest user even when time reminder is a separate user message`() {
+        val entries = listOf("U:old", "A:old", "U:time reminder", "U:question")
+        val once = trimOldestConversationSegment(entries) { it.startsWith("U:") }
+        assertEquals(listOf("U:time reminder", "U:question"), once)
+        assertEquals(
+            listOf("U:question"),
+            trimOldestConversationSegment(once) { it.startsWith("U:") },
+        )
+    }
+
+    @Test
+    fun `will not orphan an assistant when no later user exists`() {
+        val entries = listOf("U:question", "A:tool-result")
+        assertEquals(entries, trimOldestConversationSegment(entries) { it.startsWith("U:") })
+    }
+}

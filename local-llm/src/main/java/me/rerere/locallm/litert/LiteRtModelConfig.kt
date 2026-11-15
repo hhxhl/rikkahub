@@ -59,8 +59,17 @@ object LiteRtModelDefaults {
 
     private fun fallbackFor(modelFile: String): LiteRtModelConfig {
         val ceiling = contextCeilingFromFileName(modelFile)
+        // Exported Qwen3-0.6B variants (notably *_nothink_*) are not exact catalog
+        // filenames. Keep the official family sampler rather than a random fallback
+        // temperature=1.0, but do not guess sampler values for other architectures.
+        val isQwen3SixHundredM = Regex(
+            """qwen3[_.-]0[_.-]6b""", RegexOption.IGNORE_CASE,
+        ).containsMatchIn(modelFile)
         return LiteRtModelConfig(
             modelFile = modelFile,
+            topK = if (isQwen3SixHundredM) 20 else 64,
+            topP = 0.95,
+            temperature = if (isQwen3SixHundredM) 0.6 else 1.0,
             maxTokens = ceiling?.coerceAtMost(4096) ?: 4096,
             maxContextLength = ceiling,
             sizeBytes = 0L,

@@ -35,6 +35,21 @@ internal fun truncateLocalSystemText(text: String, charLimit: Int): String {
 }
 
 /**
+ * Drop an entire oldest USER-led segment, up to (but not including) the next USER.
+ * Returning the original list means the oldest segment cannot safely be trimmed.
+ * In particular, never turn the latest assistant/tool result into an orphan input.
+ */
+internal fun <T> trimOldestConversationSegment(
+    messages: List<T>,
+    isUser: (T) -> Boolean,
+): List<T> {
+    if (messages.size <= 1) return messages
+    val nextUser = (1 until messages.size).firstOrNull { isUser(messages[it]) }
+        ?: return messages
+    return messages.drop(nextUser)
+}
+
+/**
  * Outcome of [decideImageForwarding]: whether to hand image bytes to the runtime this turn,
  * and whether the user's attached images were dropped in a way that warrants a chat note.
  */
@@ -72,10 +87,9 @@ internal fun decideImageForwarding(
  * model the same way it picks an OpenAI / Claude model. Routes inference through
  * [LiteRtRuntime] and tool calls through [LiteRtToolPrefix].
  *
- * When [LiteRtRuntime.ensureLoaded] throws [LiteRtModelCorruptException], this provider
- * self-heals: the broken file is deleted from disk, removed from [LocalRuntimePreferences],
- * and removed from [ProviderSetting.LiteRtLocal.models] via [settingsUpdater]. The caller
- * receives a user-readable [RuntimeException] explaining what happened.
+ * When initialization reports possible model corruption or SDK incompatibility, retain
+ * the original model file and configuration. Native errors alone are not proof that a
+ * downloaded model is irrecoverably corrupt (a GPU/SDK mismatch can look identical).
  *
  * @param settingsUpdater Suspend lambda that lets the provider mutate the persisted
  *   [ProviderSetting] list without coupling the `local-llm` module to `SettingsStore`
@@ -89,49 +103,15 @@ class LiteRtProvider(
     private val settingsUpdater: suspend (transform: (List<ProviderSetting>) -> List<ProviderSetting>) -> Unit,
 ) : Provider<ProviderSetting.LiteRtLocal> {
 
-    /**
-     * Self-heal a permanently corrupt model: delete the file from disk, remove it from
-     * [LocalRuntimePreferences], and remove it from the provider's models list in settings.
-     * After cleanup, throws a user-readable [RuntimeException] so the chat surface can
-     * display an appropriate error message.
-     */
-    private suspend fun handleCorruptModel(corrupt: LiteRtModelCorruptException): Nothing {
-        val file = java.io.File(corrupt.modelPath)
-        val fileName = file.name
-        Log.w(TAG, "Model file is corrupt — auto-removing: $fileName (${corrupt.modelPath})")
-
-        // 1. Delete the file from disk (best-effort; log if it fails).
-        runCatching { file.delete() }.onFailure { e ->
-            Log.e(TAG, "Failed to delete corrupt model file: ${corrupt.modelPath}", e)
-        }
-
-        // 2. Remove from the installed-models DataStore index.
-        runCatching { prefs.removeInstalledModel(LocalRuntime.LiteRT, fileName) }.onFailure { e ->
-            Log.e(TAG, "Failed to remove model from prefs: $fileName", e)
-        }
-
-        // 3. Remove the matching Model entry from ProviderSetting.LiteRtLocal.models so the
-        //    entry disappears from the chat picker without requiring a manual delete.
-        runCatching {
-            settingsUpdater { providers ->
-                providers.map { p ->
-                    if (p is ProviderSetting.LiteRtLocal) {
-                        val target = p.models.firstOrNull { it.modelId == fileName }
-                        if (target != null) p.delModel(target) else p
-                    } else {
-                        p
-                    }
-                }
-            }
-        }.onFailure { e ->
-            Log.e(TAG, "Failed to remove model from provider settings: $fileName", e)
-        }
-
+    /** Do not auto-delete user-owned files on an SDK/backend initialization error. */
+    private fun handleCorruptModel(corrupt: LiteRtModelCorruptException): Nothing {
+        val fileName = java.io.File(corrupt.modelPath).name
+        Log.e(TAG, "Model load failed; original file and settings preserved: $fileName", corrupt)
         throw RuntimeException(
-            "The model file \"$fileName\" could not be loaded because it is corrupt or " +
-            "incompatible with this runtime version. The file has been removed automatically. " +
-            "Pick a different model in Settings → Providers → Local · LiteRT, or tap " +
-            "\"Install default\" to download the recommended model.",
+            "LiteRT could not load \"$fileName\". This may be a damaged file, " +
+                "an incompatible export, or an SDK/backend issue. Your model file and " +
+                "settings were NOT deleted. Check the model format and selected backend " +
+                "before manually reinstalling it.",
             corrupt,
         )
     }
@@ -312,23 +292,24 @@ class LiteRtProvider(
         //     runtime uses these to decide whether its warm Conversation's KV cache already
         //     holds a prefix of this history — if so it sends ONLY the new turn and reuses
         //     the cache (Gallery's behaviour), instead of re-prefilling the whole history.
-        //   - `coldBlob`: the full render used only when the cache can't be reused (first
-        //     turn, edited/regenerated history, tool round-trip, config change). Always
-        //     correct, just not warm.
+        //   - `coldBlob`: a compatibility fallback for non-user-ending agent/tool turns.
+        //     Ordinary cold USER turns restore prior roles via SDK `initialMessages`.
         //
         // TOOL-role messages are dropped here: their content is already represented inline
         // in the immediately-preceding ASSISTANT message's Tool part output.
         //
         // Trimming: adapt to the configured Engine context, actual tool declarations,
-        // system bytes and reserved response capacity. Drop oldest complete turns; never
-        // silently truncate the newest user's request. A reshaped history goes cold.
+        // system bytes and reserved response capacity. Drop whole older USER-led segments;
+        // never leave an orphan ASSISTANT reply at the start or truncate the latest input.
         var trimmed = messages.filter {
             it.role != MessageRole.SYSTEM && it.role != MessageRole.TOOL
         }
         var coldBlob = renderColdBlob(trimmed)
         val historyBudget = historyByteBudget(contextTokens, systemBytes, toolBytesUsed, reservePercent)
         while (coldBlob.toByteArray(Charsets.UTF_8).size > historyBudget && trimmed.size > 1) {
-            trimmed = trimmed.drop(1)
+            val next = trimOldestConversationSegment(trimmed) { it.role == MessageRole.USER }
+            if (next.size == trimmed.size) break  // no complete segment can be removed safely
+            trimmed = next
             coldBlob = renderColdBlob(trimmed)
         }
         val historyBytes = coldBlob.toByteArray(Charsets.UTF_8).size
@@ -386,6 +367,7 @@ class LiteRtProvider(
                 topK = config.topK,
                 topP = config.topP,
                 temperature = config.temperature,
+                initialTurnHistory = turns,
             )
         } catch (corrupt: LiteRtModelCorruptException) {
             handleCorruptModel(corrupt)
@@ -546,9 +528,9 @@ class LiteRtProvider(
     /**
      * Render ONE message's content WITHOUT a role marker — the raw turn text.
      *
-     * Used both for the warm path (the runtime sends this as-is and the SDK's chat template
-     * applies role wrapping, exactly like Gallery) and as the body of each line in
-     * [renderHistoryAsChatML]. Tool calls/outputs are kept in the
+     * Used for the warm path and native initialMessages, with the SDK's chat template
+     * applying actual USER/MODEL roles (as in Gallery). Also retained for the tool
+     * continuation compatibility fallback [renderHistoryAsChatML]. Tool calls/outputs are kept in the
      * `<tool_call>…</tool_call>` / `<tool_result>…</tool_result>` shape the prompt prefix
      * teaches the model, preserving prompt-engineered tool-calling continuity across turns.
      */
@@ -600,10 +582,9 @@ class LiteRtProvider(
      * The cold-path render of the (already SYSTEM/TOOL-filtered) history — what the runtime
      * sends when it cannot reuse a warm KV cache.
      *
-     * A single message is sent raw, so the SDK chat template wraps it cleanly (identical to
-     * the warm path). Multiple messages are crammed into one marker-formatted ChatML blob:
-     * Qwen/Gemma recognise the inner "User:/Assistant:" markers from their instruction-tuning
-     * data even when the template only wraps the OUTER content.
+     * For ordinary conversations, this is used for budgeting only: the runtime now sends
+     * native initialMessages + the latest user message. For non-user-ending tool continuations,
+     * keep the previous text fallback until native tool-result replay is implemented.
      */
     private fun renderColdBlob(messages: List<UIMessage>): String =
         if (messages.size == 1) renderTurnRawText(messages[0])
