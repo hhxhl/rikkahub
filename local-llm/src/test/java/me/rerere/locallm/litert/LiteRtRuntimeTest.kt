@@ -224,6 +224,62 @@ class LiteRtRuntimeTest {
         assertEquals(null, matchNativeToolResults(null, toolStep, listOf(search, time)))
     }
 
+    // ---- Warm reuse after a native TOOL turn --------------------------------------
+
+    private val toolPrefix = listOf(
+        Turn(ROLE_USER, "你好"),
+        Turn(ROLE_ASSISTANT, "你好！"),
+        Turn(ROLE_USER, "现在几点？"),
+    )
+    private val assistantToolText =
+        """<tool_call>{"name":"get_time_info","arguments":{}}</tool_call>""" +
+        "\n<tool_result>{\"time\":\"06:16:00\"}</tool_result>"
+    private val completedTimeTurn = CompletedNativeToolTurn(
+        precedingTurns = toolPrefix,
+        assistantBeforeFinalReply = assistantToolText,
+        finalReply = "现在是 06:16。",
+    )
+
+    @Test
+    fun `native TOOL completion can warm append when finalized host history matches exactly`() {
+        val history = toolPrefix + listOf(
+            Turn(ROLE_ASSISTANT, assistantToolText + completedTimeTurn.finalReply),
+            Turn(ROLE_USER, "刚才聊了什么？"),
+        )
+        val processed = reconciledToolTurnSignatures(completedTimeTurn, history)
+        assertEquals(history.dropLast(1).map { it.signature }, processed)
+        val plan = LiteRtRuntime.planTurns(processed!!, history.map { it.signature }, hasMedia = false)
+        assertTrue(plan is TurnPlan.Warm)
+        assertEquals(history.lastIndex, (plan as TurnPlan.Warm).sendFromIndex)
+    }
+
+    @Test
+    fun `native TOOL completion fails closed on edited or missing results and reply`() {
+        val valid = toolPrefix + listOf(
+            Turn(ROLE_ASSISTANT, assistantToolText + completedTimeTurn.finalReply),
+            Turn(ROLE_USER, "继续"),
+        )
+        assertEquals(null, reconciledToolTurnSignatures(null, valid))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, valid.dropLast(1)))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, valid.dropLast(2) + Turn(ROLE_USER, "继续")))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, valid.dropLast(2) + listOf(Turn(ROLE_ASSISTANT, "旧结果"), valid.last())))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, valid.dropLast(2) + listOf(Turn(ROLE_ASSISTANT, assistantToolText), valid.last())))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, valid.dropLast(2) + listOf(Turn(ROLE_ASSISTANT, assistantToolText + "已修改"), valid.last())))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, listOf(Turn(ROLE_USER, "改过的问题")) + valid.drop(1)))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, valid.dropLast(1) + Turn(ROLE_ASSISTANT, "多了一轮")))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, valid.dropLast(1) + listOf(Turn(ROLE_ASSISTANT, "多了一轮"), valid.last())))
+    }
+
+    @Test
+    fun `native TOOL completion refuses empty output and changed synthetic prefix`() {
+        val valid = toolPrefix + listOf(
+            Turn(ROLE_ASSISTANT, assistantToolText + completedTimeTurn.finalReply),
+            Turn(ROLE_USER, "继续"),
+        )
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn.copy(finalReply = ""), valid))
+        assertEquals(null, reconciledToolTurnSignatures(completedTimeTurn, valid.drop(1)))
+    }
+
     // ---- isVisionExecutorError -----------------------------------------------------
 
     @Test

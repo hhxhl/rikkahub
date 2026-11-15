@@ -97,6 +97,40 @@ internal data class PendingToolBatch(
 )
 
 /**
+ * The SDK has finished a native TOOL reply, but RikkaHub has not yet supplied the
+ * final assistant message back to this Provider. RikkaHub stores tool calls, results
+ * and subsequent model text inside ONE assistant UIMessage; the SDK stores them as
+ * MODEL -> TOOL -> MODEL messages. Never guess a processed signature from the SDK
+ * output alone: wait for the next request and check RikkaHub's *actual* history.
+ */
+internal data class CompletedNativeToolTurn(
+    val precedingTurns: List<Turn>,
+    val assistantBeforeFinalReply: String,
+    val finalReply: String,
+)
+
+/**
+ * Reconcile the completed SDK tool turn with RikkaHub's returned conversation.
+ * A valid follow-up must be exactly [unchanged prefix, completed ASSISTANT, new USER].
+ * Compare full raw text (not only hashes) to fail closed on edits, transformed output,
+ * inserted notices, removed tool results or context trimming. Cold recovery remains
+ * available when the model's visible reply differs from its raw SDK callback.
+ */
+internal fun reconciledToolTurnSignatures(
+    completed: CompletedNativeToolTurn?,
+    history: List<Turn>,
+): List<String>? {
+    if (completed == null || completed.finalReply.isBlank()) return null
+    if (history.size != completed.precedingTurns.size + 2) return null
+    if (history.last().role != ROLE_USER) return null
+    if (history.dropLast(2) != completed.precedingTurns) return null
+    val assistant = history[history.lastIndex - 1]
+    if (assistant.role != ROLE_ASSISTANT) return null
+    if (assistant.rawText != completed.assistantBeforeFinalReply + completed.finalReply) return null
+    return history.dropLast(1).map { it.signature }
+}
+
+/**
  * Match executed host results to the *exact* SDK calls from the preceding generation.
  * Call ids matter: two invocations of the same function must not be confused. Fail
  * closed on edits, partial approvals, duplicate ids or argument changes.
@@ -219,11 +253,10 @@ class LiteRtVisionUnavailableException(
  * (model, accelerator, sampler, system instruction) tuple is unchanged. [streamTurns]
  * compares the caller's full turn list against [LoadedModel.processed] (the signatures the
  * live Conversation has already consumed): a clean single-turn append reuses the warm KV
- * cache; anything else (a new chat, an edited/regenerated turn, a tool round-trip, a config
- * change) falls back to recreating the Conversation using SDK initialMessages for
- * text turns. Non-user-ending tool continuations retain a compatibility text fallback.
- * The warm path is an optimisation, and a signature
- * mismatch can only cost a cold reload, never produce wrong output.
+ * cache. A completed native TOOL turn can also continue Warm, but only after its final
+ * assistant rendering matches RikkaHub's returned history exactly. Edits, trimming,
+ * cancellation and config changes still force Cold recovery via SDK initialMessages.
+ * Non-user-ending tool continuations keep the compatibility text fallback.
  *
  * # Concurrency
  *
@@ -421,6 +454,8 @@ class LiteRtRuntime(
         var initialHistorySignatures: List<String> = emptyList(),
         /** Non-null only after the SDK surfaced tool calls and the host has yet to return results. */
         var pendingToolBatch: PendingToolBatch? = null,
+        /** Await exact host-history reconciliation before allowing a post-tool Warm append. */
+        var completedToolTurn: CompletedNativeToolTurn? = null,
         /** Set after ensureLoaded until streamTurns begins: protects that gap from a
          *  model-selection preload closing the Engine before its actual request starts. */
         var pendingStreamOwner: String? = null,
@@ -687,6 +722,7 @@ class LiteRtRuntime(
             current.conversationSpec = desiredConversationSpec
             current.processed.clear()
             current.pendingToolBatch = null
+            current.completedToolTurn = null
             current.pristineConversation = true
             current.pendingStreamOwner = requestId
             return@withLock LoadOutcome(
@@ -981,6 +1017,7 @@ class LiteRtRuntime(
         )
         instance.pristineConversation = true
         instance.pendingToolBatch = null
+        instance.completedToolTurn = null
         instance.initialHistorySignatures = emptyList() // overwritten by streamTurns for native cold
     }
 
@@ -994,9 +1031,12 @@ class LiteRtRuntime(
      *  - **Warm:** the cache holds everything except exactly one newly-appended turn → send
      *    only that turn's [Turn.rawText]; the SDK's chat template applies role wrapping and
      *    the prior turns are reused from the cache (Gallery's behaviour).
-     *  - **Cold:** first turn, changed history, media or tool round-trip → recreate the
-     *    Conversation with real role-bearing initialMessages when the last turn is USER.
-     *    [coldBlob] remains the compatibility path for tool continuations ending ASSISTANT.
+     *  - **Native TOOL:** execute only after AgentLoop approval, submit SDK TOOL-role
+     *    results, and reconcile the completed assistant against returned host history
+     *    before the next ordinary Warm append.
+     *  - **Cold:** first turn, changed history or unsupported input → recreate with
+     *    role-bearing initialMessages when the last turn is USER. [coldBlob] remains
+     *    the compatibility path for unmatched tool continuations ending ASSISTANT.
      *
      * Each emitted String is the **cumulative** response so far, NOT a delta — same contract
      * as Gallery's `partialResult`. Downstream consumers compute deltas themselves.
@@ -1052,6 +1092,20 @@ class LiteRtRuntime(
                 "LiteRT request was superseded before generation started; retry this turn"
             }
             instance.pendingStreamOwner = null
+            // A native TOOL continuation completed on the previous request. Only now
+            // can we see RikkaHub's finalized assistant part ordering and transformations.
+            // Reconcile against actual UI history before trusting the SDK's warm KV state.
+            val completedToolTurn = instance.completedToolTurn
+            val syncedToolPrefix = reconciledToolTurnSignatures(completedToolTurn, history)
+            instance.completedToolTurn = null  // one-shot; mismatches must fall back to Cold
+            if (syncedToolPrefix != null) {
+                instance.processed.clear()
+                instance.processed.addAll(syncedToolPrefix)
+                android.util.Log.i("LiteRtRuntime", "streamTurns: tool turn history synchronized")
+            } else if (completedToolTurn != null) {
+                // No user content in logs; report only the safe Cold decision.
+                android.util.Log.d("LiteRtRuntime", "streamTurns: tool turn history mismatch; Cold recovery")
+            }
             // The host has finished approval/execution and returned the tool outputs.
             // Continue the SAME Conversation with a real TOOL-role message only when the
             // exact pending call ids, arguments and unchanged conversation prefix match.
@@ -1167,15 +1221,26 @@ class LiteRtRuntime(
                         // if it is a clean single-turn append. Mutating [processed] here is
                         // safe: the mutex is held for this whole streamTurns invocation.
                         instance.processed.clear()
+                        instance.completedToolTurn = null
                         if (!cancellationRequested.get()) {
-                            // Native tool replies are appended to the existing assistant
-                            // message in RikkaHub, not emitted as an independent turn.
-                            // The SDK/cache signatures therefore cannot be assumed equal.
                             if (nativeToolResults == null) {
+                                // Ordinary turns are represented in RikkaHub as one newly
+                                // appended assistant message; regular Warm behaviour is safe.
                                 instance.processed.addAll(historySignatures)
                                 instance.processed.add(turnSignature(ROLE_ASSISTANT, fullResponse))
+                            } else if (requestedTools.isEmpty() && fullResponse.isNotBlank()) {
+                                // SDK native history uses MODEL/TOOL/MODEL, while RikkaHub
+                                // stores these in one ASSISTANT UIMessage. Reconcile its
+                                // exact final rendering on the next call before Warm reuse.
+                                instance.completedToolTurn = CompletedNativeToolTurn(
+                                    precedingTurns = history.dropLast(1).toList(),
+                                    assistantBeforeFinalReply = history.last().rawText,
+                                    finalReply = fullResponse,
+                                )
                             }
                             if (requestedTools.isNotEmpty()) {
+                                // Another tool step must be approved/executed by AgentLoop;
+                                // do not mark this multi-tool sequence as complete yet.
                                 val anchor = if (history.lastOrNull()?.role == ROLE_ASSISTANT) {
                                     historySignatures.dropLast(1)
                                 } else historySignatures
@@ -1191,6 +1256,7 @@ class LiteRtRuntime(
                         // The KV-cache state is now unknown — force the next turn cold.
                         instance.processed.clear()
                         instance.pendingToolBatch = null
+                        instance.completedToolTurn = null
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
                         nativeFinished.complete(Unit)
@@ -1211,6 +1277,7 @@ class LiteRtRuntime(
                             .onFailure { android.util.Log.w("LiteRtRuntime", "cancelProcess failed", it) }
                         instance.processed.clear()
                         instance.pendingToolBatch = null
+                        instance.completedToolTurn = null
                     }
                 }
             } finally {
