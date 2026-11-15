@@ -164,11 +164,6 @@ fun ProviderConfigureLiteRT(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("运行时", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "推理后端与运行状态",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.surfaceVariant,
@@ -179,14 +174,14 @@ fun ProviderConfigureLiteRT(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     LiteRtStatusRow(
-                        label = "实际运行后端",
+                        label = "运行后端",
                         value = activeBackend?.backend ?: "未加载",
                     )
                     LiteRtStatusRow(
                         label = "Engine 状态",
                         value = when {
                             activeBackend == null -> "未加载"
-                            activeBackend?.preloadedOnly == true -> "已预加载（Conversation 未创建）"
+                            activeBackend?.preloadedOnly == true -> "预加载（Conversation 未创建）"
                             else -> "已加载（Conversation 已创建）"
                         },
                     )
