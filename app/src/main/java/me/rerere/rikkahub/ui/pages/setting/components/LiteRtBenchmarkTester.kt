@@ -34,8 +34,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import me.rerere.ai.provider.ModelType
-import me.rerere.ai.provider.ProviderSetting
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Tools
 import me.rerere.locallm.LocalRuntimePreferences
@@ -43,13 +41,12 @@ import me.rerere.locallm.litert.LiteRtBenchmarkRunner
 import me.rerere.locallm.litert.LiteRtRuntime
 import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.R
-import me.rerere.rikkahub.ui.components.ai.ModelSelector
 import org.koin.compose.koinInject
 import java.util.Locale
 
-/** Only shown for ProviderSetting.LiteRtLocal; original connection testing is unchanged. */
+/** A model-scoped benchmark action displayed immediately after the NPU chip. */
 @Composable
-fun LiteRtBenchmarkTester(provider: ProviderSetting.LiteRtLocal) {
+fun LiteRtBenchmarkTester(modelId: String, enabled: Boolean, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val runtime = koinInject<LiteRtRuntime>()
@@ -59,9 +56,6 @@ fun LiteRtBenchmarkTester(provider: ProviderSetting.LiteRtLocal) {
     }
 
     var dialogOpen by remember { mutableStateOf(false) }
-    var model by remember(provider.id) {
-        mutableStateOf(provider.models.firstOrNull { it.type == ModelType.CHAT })
-    }
     var accelerator by remember { mutableStateOf("CPU") }
     var prefill by remember { mutableStateOf("256") }
     var decode by remember { mutableStateOf("256") }
@@ -93,7 +87,7 @@ fun LiteRtBenchmarkTester(provider: ProviderSetting.LiteRtLocal) {
         }
     }
 
-    IconButton(onClick = { dialogOpen = true }) {
+    IconButton(onClick = { dialogOpen = true }, enabled = enabled, modifier = modifier) {
         Icon(HugeIcons.Tools, contentDescription = stringResource(R.string.litert_benchmark_title))
     }
 
@@ -101,7 +95,7 @@ fun LiteRtBenchmarkTester(provider: ProviderSetting.LiteRtLocal) {
         val p = prefill.toIntOrNull()
         val d = decode.toIntOrNull()
         val n = runCount.toIntOrNull()
-        val valid = model != null && p != null && p in 1..8192 &&
+        val valid = p != null && p in 1..8192 &&
             d != null && d in 1..4096 && n != null && n in 1..10
         AlertDialog(
             onDismissRequest = { if (!running) dialogOpen = false },
@@ -112,12 +106,7 @@ fun LiteRtBenchmarkTester(provider: ProviderSetting.LiteRtLocal) {
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Text(stringResource(R.string.litert_benchmark_tip))
-                    ModelSelector(
-                        modelId = model?.id,
-                        providers = listOf(provider),
-                        type = ModelType.CHAT,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { if (!running) model = it }
+                    Text(modelId.removeSuffix(".litertlm"))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("CPU", "GPU").forEach { backend ->
                             FilterChip(
@@ -191,7 +180,7 @@ fun LiteRtBenchmarkTester(provider: ProviderSetting.LiteRtLocal) {
                     TextButton(
                         enabled = !running && valid,
                         onClick = {
-                            val id = model?.modelId ?: return@TextButton
+                            val id = modelId
                             val prefillCount = p ?: return@TextButton
                             val decodeCount = d ?: return@TextButton
                             val repeatCount = n ?: return@TextButton

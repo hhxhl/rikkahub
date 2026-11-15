@@ -140,7 +140,6 @@ import me.rerere.rikkahub.ui.pages.assistant.detail.CustomBodies
 import me.rerere.rikkahub.ui.pages.assistant.detail.CustomHeaders
 import me.rerere.rikkahub.ui.pages.setting.components.ProviderConfigure
 import me.rerere.rikkahub.ui.pages.setting.components.ProviderConnectionTester
-import me.rerere.rikkahub.ui.pages.setting.components.LiteRtBenchmarkTester
 import me.rerere.rikkahub.ui.pages.setting.components.SettingProviderQuotaQuery
 import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.rikkahub.ui.theme.extendColors
@@ -368,9 +367,6 @@ private fun SettingProviderConfigPage(
                     ProviderConnectionTester(
                         internalProvider = internalProvider,
                     )
-                    (internalProvider as? ProviderSetting.LiteRtLocal)?.let {
-                        LiteRtBenchmarkTester(provider = it)
-                    }
 
                     if (!internalProvider.builtIn) {
                         IconButton(

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
@@ -27,6 +28,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -330,6 +332,13 @@ fun ProviderConfigureLiteRT(
                             },
                             label = { Text(backend) },
                             enabled = !busy && model.modelId in installed,
+                        )
+                    }
+                    key(model.modelId) {
+                        LiteRtBenchmarkTester(
+                            modelId = model.modelId,
+                            enabled = !busy && model.modelId in installed,
+                            modifier = Modifier.size(40.dp),
                         )
                     }
                 }
