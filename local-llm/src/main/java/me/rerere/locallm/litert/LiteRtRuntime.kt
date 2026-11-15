@@ -6,7 +6,6 @@ import android.os.Build
 import android.os.PerformanceHintManager
 import android.os.Process
 import com.google.ai.edge.litertlm.Backend
-import com.google.ai.edge.litertlm.Capabilities
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
@@ -17,6 +16,7 @@ import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
+import com.google.ai.edge.litertlm.ModelInfo
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ToolProvider
 import kotlinx.serialization.json.JsonArray
@@ -422,7 +422,9 @@ class LiteRtRuntime(private val context: Context) {
         publishBackendStatus()
 
         val fileSupportsSpec = try {
-            Capabilities(modelPath).use { it.hasSpeculativeDecodingSupport() }
+            ModelInfo.from(modelPath).use { info ->
+                (info as? ModelInfo.Llm)?.hasSpeculativeDecodingSupport() == true
+            }
         } catch (_: Throwable) { false }
         try {
             val engine = createEngineWithBackend(key, accel)
@@ -539,7 +541,9 @@ class LiteRtRuntime(private val context: Context) {
 
         // Probe the file for speculative-decoding support BEFORE building the engine.
         val supportsSpeculativeDecoding = try {
-            Capabilities(modelPath).use { it.hasSpeculativeDecodingSupport() }
+            ModelInfo.from(modelPath).use { info ->
+                (info as? ModelInfo.Llm)?.hasSpeculativeDecodingSupport() == true
+            }
         } catch (_: Throwable) {
             false
         }
