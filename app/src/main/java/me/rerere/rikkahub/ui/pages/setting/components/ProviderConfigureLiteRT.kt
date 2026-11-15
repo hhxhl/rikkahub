@@ -71,6 +71,7 @@ fun ProviderConfigureLiteRT(
 
     val installed by prefs.installedModelsFlow(LocalRuntime.LiteRT).collectAsState(initial = emptyMap())
     val forceCpu by prefs.forceCpuFlow(LocalRuntime.LiteRT).collectAsState(initial = true)
+    val activeBackend by runtime.backendStatus.collectAsState()
     val contextOverride by prefs.maxNumTokensOverrideFlow(LocalRuntime.LiteRT).collectAsState(initial = null)
     var tokenField by remember(contextOverride) { mutableStateOf(contextOverride?.toString().orEmpty()) }
     var url by remember { mutableStateOf("") }
@@ -201,6 +202,30 @@ fun ProviderConfigureLiteRT(
                 )
             }
             Text("Tensor / GrapheneOS 设备建议先使用 CPU；GPU 原生崩溃不能通过普通异常捕获。")
+            Text("实际运行后端：${activeBackend?.backend ?: "未加载"}")
+            activeBackend?.let { state ->
+                Text("模型：${state.modelName} · ${if (state.preloadedOnly) "Engine 已预加载" else "Conversation 已创建"}")
+                state.note?.let { note -> Text(note) }
+            }
+            OutlinedButton(
+                onClick = {
+                    submit {
+                        val removed = runtime.clearGpuCrashMarkers()
+                        // A successful CPU fallback is also persisted as the preferred
+                        // accelerator. Request GPU on the next model load, otherwise
+                        // simply deleting crash guards would still choose cached CPU.
+                        prefs.setAccelerator(LocalRuntime.LiteRT, "GPU")
+                        prefs.clearCrashRecovery(LocalRuntime.LiteRT)
+                        val forcedCpu = prefs.forceCpu(LocalRuntime.LiteRT)
+                        status = if (forcedCpu) {
+                            "已清除 $removed 条 GPU 崩溃记录；请先关闭「强制 CPU」，再重启应用重试 GPU。"
+                        } else {
+                            "已清除 $removed 条 GPU 崩溃记录并重置 CPU 回退缓存；重启应用后将重新尝试 GPU。"
+                        }
+                    }
+                },
+                enabled = !busy,
+            ) { Text("清除 GPU 崩溃记录") }
             OutlinedTextField(
                 value = tokenField,
                 onValueChange = { tokenField = it.filter(Char::isDigit) },

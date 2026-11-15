@@ -27,6 +27,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
@@ -177,6 +180,47 @@ class LiteRtVisionUnavailableException(
  */
 class LiteRtRuntime(private val context: Context) {
 
+    /** The last successfully initialized normal-chat Engine, not the selected preference.
+     * Null means no chat Engine is resident (including while Benchmark is running).
+     * A GPU backend here denotes the configured LiteRT main backend, not every operator. */
+    data class BackendStatus(
+        val modelName: String,
+        val backend: String,
+        val preloadedOnly: Boolean,
+        val note: String? = null,
+    )
+
+    private val _backendStatus = MutableStateFlow<BackendStatus?>(null)
+    val backendStatus: StateFlow<BackendStatus?> = _backendStatus.asStateFlow()
+
+    private fun actualBackendName(accel: String): String = when (accel) {
+        "GPU" -> "GPU"
+        "QNN", "NPU", "TPU" -> "NPU"
+        else -> "CPU" // The existing NNAPI/unknown mapping uses Backend.CPU().
+    }
+
+    /** Call while holding [mutex] whenever the active Engine changes. */
+    private fun publishBackendStatus() {
+        val running = loaded
+        _backendStatus.value = if (running != null) {
+            BackendStatus(
+                modelName = File(running.engineKey.modelPath).name,
+                backend = actualBackendName(running.engineKey.accelerator),
+                preloadedOnly = false,
+                note = running.backendNote,
+            )
+        } else {
+            preloaded?.let { staged ->
+                BackendStatus(
+                    modelName = File(staged.engineKey.modelPath).name,
+                    backend = actualBackendName(staged.engineKey.accelerator),
+                    preloadedOnly = true,
+                    note = staged.backendNote,
+                )
+            }
+        }
+    }
+
     private val mutex = Mutex()
     private var loaded: LoadedModel? = null
 
@@ -230,6 +274,28 @@ class LiteRtRuntime(private val context: Context) {
     private fun crashedPreviously(modelPath: String, accel: String): Boolean =
         accel != "CPU" && crashMarkers.getBoolean(crashMarkerKey(modelPath, accel), false)
 
+    /**
+     * Explicit user-requested GPU retry. Clears durable GPU crash guards only, across
+     * model files and SDK versions. Caller must also reset the persisted accelerator
+     * decision: otherwise a previously cached CPU fallback will still win next launch.
+     *
+     * The current Engine / Conversation is left untouched. The mutex prevents clearing
+     * the marker in the middle of a generation (which would hide a fresh native crash).
+     * A future GPU attempt will arm the marker again before entering JNI.
+     */
+    suspend fun clearGpuCrashMarkers(): Int = mutex.withLock {
+        val keys = crashMarkers.all.keys.filter { key ->
+            key.split('|').getOrNull(1) == "GPU"
+        }
+        if (keys.isEmpty()) return@withLock 0
+        val editor = crashMarkers.edit()
+        keys.forEach { editor.remove(it) }
+        check(editor.commit()) { "无法保存 GPU 崩溃记录的清除结果" }
+        if (armedMarkerKey?.let { it in keys } == true) armedMarkerKey = null
+        android.util.Log.i("LiteRtRuntime", "clearGpuCrashMarkers: removed ${keys.size} GPU markers")
+        keys.size
+    }
+
     // ---- Idle teardown ----
     //
     // The Engine + Conversation pin ~2-4 GB of native heap for the loaded model.
@@ -279,6 +345,7 @@ class LiteRtRuntime(private val context: Context) {
                         preloaded = null
                     }
                 }
+                publishBackendStatus()
             }
         }
     }
@@ -338,6 +405,7 @@ class LiteRtRuntime(private val context: Context) {
         /** True iff [engineKey.speculativeDecoding] was true at engine.initialize() time.
          *  Surfaced by [LoadOutcome.speculativeDecodingEngaged]. */
         val speculativeDecodingEngaged: Boolean,
+        val backendNote: String? = null,
         /** Signatures of the turns the live Conversation's KV cache currently holds, in
          *  order — the caller-supplied history turns plus one synthetic assistant turn for
          *  the response generated last. Cleared whenever the Conversation is recreated. */
@@ -358,6 +426,7 @@ class LiteRtRuntime(private val context: Context) {
         val engine: Engine,
         val fileSupportsSpeculativeDecoding: Boolean,
         val speculativeDecodingEngaged: Boolean,
+        val backendNote: String? = null,
         @Volatile var lastUseAtMs: Long = android.os.SystemClock.elapsedRealtime(),
     )
 
@@ -383,10 +452,17 @@ class LiteRtRuntime(private val context: Context) {
     ): PreloadResult = mutex.withLock {
         val requestedAccel = if (forceCpu) "CPU"
             else sessionFallbackAccelerator ?: preferredAccel ?: AcceleratorProbe.probeLiteRt(context)
-        val accel = if (crashedPreviously(modelPath, requestedAccel)) {
+        val skippedCrash = crashedPreviously(modelPath, requestedAccel)
+        val accel = if (skippedCrash) {
             sessionFallbackAccelerator = "CPU"
             "CPU"
         } else requestedAccel
+        val initialNote = when {
+            forceCpu -> "强制 CPU 模式"
+            skippedCrash -> "$requestedAccel 此前发生原生崩溃，已跳过并使用 CPU"
+            sessionFallbackAccelerator == "CPU" -> "沿用此前自动回退的 CPU"
+            else -> null
+        }
         // Provider currently uses speculativeDecoding=false for all models.
         val key = EngineKey(
             modelPath = modelPath,
@@ -421,6 +497,7 @@ class LiteRtRuntime(private val context: Context) {
         // Replace only an unused staged Engine; never interrupt a live Conversation.
         try { preloaded?.engine?.close() } catch (_: Throwable) {}
         preloaded = null
+        publishBackendStatus()
 
         val fileSupportsSpec = try {
             Capabilities(modelPath).use { it.hasSpeculativeDecodingSupport() }
@@ -448,7 +525,11 @@ class LiteRtRuntime(private val context: Context) {
                     engine = engine,
                     fileSupportsSpeculativeDecoding = fileSupportsSpec,
                     speculativeDecodingEngaged = false,
+                    backendNote = if (candidate.accelerator != accel) {
+                        "$accel 初始化失败，已自动回退 ${actualBackendName(candidate.accelerator)}"
+                    } else initialNote,
                 )
+                publishBackendStatus()
                 android.util.Log.i(
                     "LiteRtRuntime",
                     "preloadEngine: ready ${File(modelPath).name}, ${candidate.accelerator}, " +
@@ -478,6 +559,7 @@ class LiteRtRuntime(private val context: Context) {
         if (modelPath == null || staged.engineKey.modelPath == modelPath) {
             try { staged.engine.close() } catch (_: Throwable) {}
             preloaded = null
+            publishBackendStatus()
         }
     }
 
@@ -563,7 +645,8 @@ class LiteRtRuntime(private val context: Context) {
             ?: AcceleratorProbe.probeLiteRt(context)
         // A prior run on this accelerator took the process down mid-inference. There is no
         // safe way to retry it, so stay on CPU until the SDK version changes.
-        val accel = if (crashedPreviously(modelPath, requestedAccel)) {
+        val skippedCrash = crashedPreviously(modelPath, requestedAccel)
+        val accel = if (skippedCrash) {
             android.util.Log.w(
                 "LiteRtRuntime",
                 "ensureLoaded: $requestedAccel crashed the process on a previous run for " +
@@ -573,6 +656,12 @@ class LiteRtRuntime(private val context: Context) {
             "CPU"
         } else {
             requestedAccel
+        }
+        val initialNote = when {
+            forceCpu -> "强制 CPU 模式"
+            skippedCrash -> "$requestedAccel 此前发生原生崩溃，已跳过并使用 CPU"
+            sessionFallbackAccelerator == "CPU" -> "沿用此前自动回退的 CPU"
+            else -> null
         }
 
         // Probe the file for speculative-decoding support BEFORE building the engine.
@@ -671,8 +760,10 @@ class LiteRtRuntime(private val context: Context) {
                         conversation = conv,
                         fileSupportsSpeculativeDecoding = staged.fileSupportsSpeculativeDecoding,
                         speculativeDecodingEngaged = staged.speculativeDecodingEngaged,
+                        backendNote = staged.backendNote,
                         pendingStreamOwner = requestId,
                     )
+                    publishBackendStatus()
                     android.util.Log.i("LiteRtRuntime", "ensureLoaded: reused preloaded Engine")
                     armIdleTeardown()
                     return@withLock LoadOutcome(
@@ -685,12 +776,14 @@ class LiteRtRuntime(private val context: Context) {
                     )
                 } catch (t: Throwable) {
                     try { staged.engine.close() } catch (_: Throwable) {}
+                    publishBackendStatus()
                     android.util.Log.w("LiteRtRuntime", "preloaded Engine conversation failed; normal load retry", t)
                 }
             } else {
                 // Settings/model changed during the background load; discard stale Engine.
                 try { staged.engine.close() } catch (_: Throwable) {}
                 preloaded = null
+                publishBackendStatus()
             }
         }
 
@@ -698,6 +791,7 @@ class LiteRtRuntime(private val context: Context) {
         try { current?.conversation?.close() } catch (_: Throwable) {}
         try { current?.engine?.close() } catch (_: Throwable) {}
         loaded = null
+        publishBackendStatus()
 
         // Try the preferred accelerator first; fall back to CPU if it isn't already CPU.
         // Arm the durable marker first: engine init is one of the two places a broken GPU
@@ -824,8 +918,12 @@ class LiteRtRuntime(private val context: Context) {
             conversation = loadResult.conversation,
             fileSupportsSpeculativeDecoding = supportsSpeculativeDecoding,
             speculativeDecodingEngaged = effectiveSpeculativeDecoding,
+            backendNote = if (loadResult.accelerator != accel) {
+                "$accel 初始化失败，已自动回退 ${actualBackendName(loadResult.accelerator)}"
+            } else initialNote,
             pendingStreamOwner = requestId,
         )
+        publishBackendStatus()
         android.util.Log.i(
             "LiteRtRuntime",
             "ensureLoaded: accel=${loadResult.accelerator} visionEnabled=${loadResult.supportImage} " +
@@ -1257,6 +1355,7 @@ class LiteRtRuntime(private val context: Context) {
             try { preloaded?.engine?.close() } catch (_: Throwable) {}
             loaded = null
             preloaded = null
+            publishBackendStatus()
             // The normal chat Engine always starts with this flag off.
             ExperimentalFlags.enableBenchmark = false
             // Preserve the existing native-crash recovery on the benchmark GPU path.
@@ -1280,6 +1379,7 @@ class LiteRtRuntime(private val context: Context) {
             try { preloaded?.engine?.close() } catch (_: Throwable) {}
             loaded = null
             preloaded = null
+            publishBackendStatus()
         }
     }
 
