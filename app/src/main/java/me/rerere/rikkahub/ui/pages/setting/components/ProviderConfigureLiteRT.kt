@@ -8,12 +8,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -27,7 +30,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +54,8 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import okhttp3.OkHttpClient
 import org.koin.compose.koinInject
 import java.io.File
+
+private enum class LiteRtConfigSection { RUNTIME, CONTEXT, MODELS, IMPORT }
 
 /**
  * Thin Compose adapter for the Agent's self-contained local-llm module.
@@ -77,6 +86,8 @@ fun ProviderConfigureLiteRT(
     var url by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
+    var statusSection by remember { mutableStateOf<LiteRtConfigSection?>(null) }
+    var showUrlInput by rememberSaveable { mutableStateOf(false) }
     var transferProgress by remember { mutableStateOf<Float?>(null) }
 
     /** Register only after the file exists and has passed the LiteRT-LM magic check. */
@@ -109,10 +120,11 @@ fun ProviderConfigureLiteRT(
         }
     }
 
-    fun submit(task: suspend () -> Unit) {
+    fun submit(section: LiteRtConfigSection, task: suspend () -> Unit) {
         if (busy) return
         busy = true
         status = null
+        statusSection = section
         scope.launch {
             try {
                 task()
@@ -127,10 +139,112 @@ fun ProviderConfigureLiteRT(
 
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        submit {
+        submit(LiteRtConfigSection.IMPORT) {
             val file = withContext(Dispatchers.IO) { importLiteRtFile(context, uri) }
             registerModel(file)
             status = "已导入 ${file.name}"
+        }
+    }
+
+    // Keep the original provider's "是否启用" card in ProviderConfigure.kt.
+    // This component only owns the LiteRT-specific runtime/model controls.
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("运行时", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "推理后端与运行状态",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    val backendLabel = activeBackend?.backend ?: "未加载"
+                    val reason = activeBackend?.note?.takeIf(String::isNotBlank)
+                    LiteRtStatusRow(
+                        label = "实际运行后端",
+                        value = if (reason == null) backendLabel else "$backendLabel（$reason）",
+                    )
+                    LiteRtStatusRow(
+                        label = "Engine 状态",
+                        value = when {
+                            activeBackend == null -> "未加载"
+                            activeBackend?.preloadedOnly == true -> "已预加载（Conversation 未创建）"
+                            else -> "已加载（Conversation 已创建）"
+                        },
+                    )
+                    LiteRtStatusRow(
+                        label = "当前模型",
+                        value = activeBackend?.modelName?.removeSuffix(".litertlm") ?: "未加载",
+                    )
+                }
+            }
+            HorizontalDivider()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("强制 CPU", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "开启后始终使用 CPU；关闭时优先尝试 GPU",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = forceCpu,
+                    onCheckedChange = { value ->
+                        submit(LiteRtConfigSection.RUNTIME) {
+                            prefs.setForceCpu(LocalRuntime.LiteRT, value)
+                        }
+                    },
+                    enabled = !busy,
+                )
+            }
+            HorizontalDivider()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("清除 GPU 崩溃记录", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "清除后，下次启动时可重新尝试 GPU",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        submit(LiteRtConfigSection.RUNTIME) {
+                            val removed = runtime.clearGpuCrashMarkers()
+                            // Also invalidate the persisted CPU fallback decision.
+                            prefs.setAccelerator(LocalRuntime.LiteRT, "GPU")
+                            prefs.clearCrashRecovery(LocalRuntime.LiteRT)
+                            val forcedCpu = prefs.forceCpu(LocalRuntime.LiteRT)
+                            status = if (forcedCpu) {
+                                "已清除 $removed 条 GPU 崩溃记录；请先关闭「强制 CPU」，再重启应用重试 GPU。"
+                            } else {
+                                "已清除 $removed 条 GPU 崩溃记录并重置 CPU 回退缓存；重启应用后将重新尝试 GPU。"
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                ) { Text("清除") }
+            }
+            if (statusSection == LiteRtConfigSection.RUNTIME) status?.let { Text(it) }
         }
     }
 
@@ -139,157 +253,212 @@ fun ProviderConfigureLiteRT(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("LiteRT-LM 本地模型 (.litertlm)")
-            Text("模型文件保存在应用私有目录；本地推理无需 API Key。首次加载可能较慢。")
-            Button(onClick = { importPicker.launch("*/*") }, enabled = !busy) {
-                Text("从文件导入 .litertlm")
-            }
-            OutlinedTextField(
-                value = url,
-                onValueChange = { url = it },
-                label = { Text("模型直链（可选，支持 Hugging Face resolve/blob URL）") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                enabled = !busy,
+            Text("上下文长度", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "maxNumTokens（留空使用模型默认值）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedButton(
-                onClick = {
-                    submit {
-                        val normalized = ModelInstall.normalizeHuggingFaceUrl(url.trim())
-                        require(ModelInstall.isValidDownloadUrl(normalized)) { "请提供 HTTPS 模型下载地址" }
-                        val name = safeModelFileName(ModelInstall.extractFileNameFromUrl(normalized))
-                        val target = ModelInstall.targetFile(ModelInstall.localModelsDir(context), LocalRuntime.LiteRT, name)
-                        require(!target.exists()) { "模型文件已存在：$name" }
-                        var completed: File? = null
-                        withContext(Dispatchers.IO) {
-                            ModelInstall.download(client, normalized, target).collect { progress ->
-                                when (progress) {
-                                    is ModelInstall.Progress.Started -> transferProgress = null
-                                    is ModelInstall.Progress.Tick -> {
-                                        transferProgress = progress.totalBytes?.takeIf { it > 0 }
-                                            ?.let { (progress.bytesRead.toDouble() / it).toFloat().coerceIn(0f, 1f) }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = tokenField,
+                    onValueChange = { tokenField = it.filter(Char::isDigit) },
+                    label = { Text("maxNumTokens") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    enabled = !busy,
+                )
+                OutlinedButton(
+                    onClick = {
+                        submit(LiteRtConfigSection.CONTEXT) {
+                            val value = tokenField.takeIf(String::isNotBlank)?.toIntOrNull()
+                            require(tokenField.isBlank() || (value != null && value in 128..32768)) {
+                                "请输入 128–32768，或留空"
+                            }
+                            prefs.setMaxNumTokensOverride(LocalRuntime.LiteRT, value)
+                            runtime.closeIfLoaded() // New EngineConfig takes effect on next request.
+                            status = "上下文设置已保存；实际值仍受模型 KV Cache 上限约束"
+                        }
+                    },
+                    enabled = !busy,
+                ) { Text("保存") }
+            }
+            if (statusSection == LiteRtConfigSection.CONTEXT) status?.let { Text(it) }
+            Text(
+                "实际运行的上下文不会超过模型文件自身的缓存上限。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("已安装模型", style = MaterialTheme.typography.titleMedium)
+            if (provider.models.isEmpty()) {
+                Text("尚未导入模型", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            provider.models.forEach { model ->
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            model.modelId.removeSuffix(".litertlm"),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (model.displayName.isNotBlank() && model.displayName != model.modelId) {
+                            Text(
+                                model.displayName,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (model.modelId !in installed) {
+                            Text("文件未登记；请重新导入模型")
+                        }
+                    }
+                    TextButton(
+                        enabled = !busy,
+                        onClick = {
+                            submit(LiteRtConfigSection.MODELS) {
+                                runtime.closeIfLoaded()
+                                val path = installed[model.modelId]
+                                prefs.removeInstalledModel(LocalRuntime.LiteRT, model.modelId)
+                                if (path != null) {
+                                    withContext(Dispatchers.IO) {
+                                        val file = File(path)
+                                        val ownedRoot = ModelInstall.localModelsDir(context).canonicalFile
+                                        if (file.canonicalFile.toPath().startsWith(ownedRoot.toPath())) file.delete()
                                     }
-                                    is ModelInstall.Progress.Done -> completed = progress.file
-                                    is ModelInstall.Progress.Failed -> throw progress.cause
+                                }
+                                val providerId = currentProvider.id
+                                currentOnEdit(currentProvider.copy(models = currentProvider.models.filterNot { it.id == model.id }))
+                                settingsStore.update { settings ->
+                                    settings.copy(providers = settings.providers.map { setting ->
+                                        if (setting is ProviderSetting.LiteRtLocal && setting.id == providerId) {
+                                            setting.copy(models = setting.models.filterNot { it.modelId == model.modelId })
+                                        } else setting
+                                    })
+                                }
+                                status = "已移除 ${model.modelId}"
+                            }
+                        },
+                    ) { Text("移除") }
+                }
+            }
+            if (statusSection == LiteRtConfigSection.MODELS) status?.let { Text(it) }
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("模型导入", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "从本地文件导入，或通过 URL 下载模型",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = { importPicker.launch("*/*") },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                ) { Text("本地导入") }
+                OutlinedButton(
+                    onClick = { showUrlInput = !showUrlInput },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                ) { Text("URL 下载") }
+            }
+            if (showUrlInput) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("模型直链（支持 Hugging Face）") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    enabled = !busy,
+                )
+                OutlinedButton(
+                    onClick = {
+                        submit(LiteRtConfigSection.IMPORT) {
+                            val normalized = ModelInstall.normalizeHuggingFaceUrl(url.trim())
+                            require(ModelInstall.isValidDownloadUrl(normalized)) { "请提供 HTTPS 模型下载地址" }
+                            val name = safeModelFileName(ModelInstall.extractFileNameFromUrl(normalized))
+                            val target = ModelInstall.targetFile(ModelInstall.localModelsDir(context), LocalRuntime.LiteRT, name)
+                            require(!target.exists()) { "模型文件已存在：$name" }
+                            var completed: File? = null
+                            withContext(Dispatchers.IO) {
+                                ModelInstall.download(client, normalized, target).collect { progress ->
+                                    when (progress) {
+                                        is ModelInstall.Progress.Started -> transferProgress = null
+                                        is ModelInstall.Progress.Tick -> {
+                                            transferProgress = progress.totalBytes?.takeIf { it > 0 }
+                                                ?.let { (progress.bytesRead.toDouble() / it).toFloat().coerceIn(0f, 1f) }
+                                        }
+                                        is ModelInstall.Progress.Done -> completed = progress.file
+                                        is ModelInstall.Progress.Failed -> throw progress.cause
+                                    }
                                 }
                             }
+                            val file = completed ?: error("下载未完成")
+                            registerModel(file)
+                            status = "已安装 ${file.name}"
                         }
-                        val file = completed ?: error("下载未完成")
-                        registerModel(file)
-                        status = "已安装 ${file.name}"
-                    }
-                },
-                enabled = !busy && url.isNotBlank(),
-            ) { Text("从 URL 安装") }
-            if (busy) {
+                    },
+                    enabled = !busy && url.isNotBlank(),
+                ) { Text("开始下载") }
+            }
+            if (busy && statusSection == LiteRtConfigSection.IMPORT) {
                 val progress = transferProgress
                 if (progress == null) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 else LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
             }
-            status?.let { Text(it) }
+            if (statusSection == LiteRtConfigSection.IMPORT) status?.let { Text(it) }
         }
     }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("运行时")
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("强制 CPU（关闭后可尝试 GPU）")
-                Switch(
-                    checked = forceCpu,
-                    onCheckedChange = { value -> submit { prefs.setForceCpu(LocalRuntime.LiteRT, value) } },
-                    enabled = !busy,
-                )
-            }
-            Text("Tensor / GrapheneOS 设备建议先使用 CPU；GPU 原生崩溃不能通过普通异常捕获。")
-            Text("实际运行后端：${activeBackend?.backend ?: "未加载"}")
-            activeBackend?.let { state ->
-                Text("模型：${state.modelName} · ${if (state.preloadedOnly) "Engine 已预加载" else "Conversation 已创建"}")
-                state.note?.let { note -> Text(note) }
-            }
-            OutlinedButton(
-                onClick = {
-                    submit {
-                        val removed = runtime.clearGpuCrashMarkers()
-                        // A successful CPU fallback is also persisted as the preferred
-                        // accelerator. Request GPU on the next model load, otherwise
-                        // simply deleting crash guards would still choose cached CPU.
-                        prefs.setAccelerator(LocalRuntime.LiteRT, "GPU")
-                        prefs.clearCrashRecovery(LocalRuntime.LiteRT)
-                        val forcedCpu = prefs.forceCpu(LocalRuntime.LiteRT)
-                        status = if (forcedCpu) {
-                            "已清除 $removed 条 GPU 崩溃记录；请先关闭「强制 CPU」，再重启应用重试 GPU。"
-                        } else {
-                            "已清除 $removed 条 GPU 崩溃记录并重置 CPU 回退缓存；重启应用后将重新尝试 GPU。"
-                        }
-                    }
-                },
-                enabled = !busy,
-            ) { Text("清除 GPU 崩溃记录") }
-            OutlinedTextField(
-                value = tokenField,
-                onValueChange = { tokenField = it.filter(Char::isDigit) },
-                label = { Text("maxNumTokens（留空使用模型默认值）") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                enabled = !busy,
-            )
-            OutlinedButton(
-                onClick = {
-                    submit {
-                        val value = tokenField.takeIf(String::isNotBlank)?.toIntOrNull()
-                        require(tokenField.isBlank() || (value != null && value in 128..32768)) {
-                            "请输入 128–32768，或留空"
-                        }
-                        prefs.setMaxNumTokensOverride(LocalRuntime.LiteRT, value)
-                        runtime.closeIfLoaded() // New EngineConfig takes effect on next request.
-                        status = "上下文设置已保存；实际值仍受模型 KV Cache 上限约束"
-                    }
-                },
-                enabled = !busy,
-            ) { Text("保存上下文设置") }
-            Text("实际运行的上下文不会超过模型文件自身的缓存上限。")
-        }
-    }
+}
 
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("已安装模型")
-            if (provider.models.isEmpty()) Text("尚未导入模型")
-            provider.models.forEach { model ->
-                HorizontalDivider()
-                Text(model.displayName.ifBlank { model.modelId })
-                Text(model.modelId)
-                if (model.modelId !in installed) Text("文件未登记；请重新导入模型")
-                TextButton(
-                    enabled = !busy,
-                    onClick = {
-                        submit {
-                            runtime.closeIfLoaded()
-                            val path = installed[model.modelId]
-                            prefs.removeInstalledModel(LocalRuntime.LiteRT, model.modelId)
-                            if (path != null) {
-                                withContext(Dispatchers.IO) {
-                                    val file = File(path)
-                                    val ownedRoot = ModelInstall.localModelsDir(context).canonicalFile
-                                    if (file.canonicalFile.toPath().startsWith(ownedRoot.toPath())) file.delete()
-                                }
-                            }
-                            val providerId = currentProvider.id
-                            currentOnEdit(currentProvider.copy(models = currentProvider.models.filterNot { it.id == model.id }))
-                            settingsStore.update { settings ->
-                                settings.copy(providers = settings.providers.map { setting ->
-                                    if (setting is ProviderSetting.LiteRtLocal && setting.id == providerId) {
-                                        setting.copy(models = setting.models.filterNot { it.modelId == model.modelId })
-                                    } else setting
-                                })
-                            }
-                            status = "已移除 ${model.modelId}"
-                        }
-                    },
-                ) { Text("移除模型") }
-            }
-        }
+@Composable
+private fun LiteRtStatusRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.width(112.dp),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            value,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
