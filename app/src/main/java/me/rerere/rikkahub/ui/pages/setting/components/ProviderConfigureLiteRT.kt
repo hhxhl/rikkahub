@@ -39,6 +39,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import me.rerere.locallm.LiteRtRuntimeSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -60,6 +63,43 @@ import org.koin.compose.koinInject
 import java.io.File
 
 private enum class LiteRtConfigSection { RUNTIME, CONTEXT, MODELS, IMPORT }
+
+/** Plain numeric rows; no icons or preset-selection menus. */
+@Composable
+private fun LiteRtNumericSettingRow(
+    title: String,
+    description: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    unit: String,
+    enabled: Boolean,
+    placeholder: String? = null,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        OutlinedTextField(
+            value = value,
+            onValueChange = { onValueChange(it.filter(Char::isDigit)) },
+            placeholder = if (placeholder != null) { { Text(placeholder) } } else null,
+            modifier = Modifier.width(100.dp),
+            singleLine = true,
+            enabled = enabled,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        )
+        Text(unit, style = MaterialTheme.typography.bodySmall)
+    }
+}
 
 /**
  * Thin Compose adapter for the Agent's self-contained local-llm module.
@@ -86,8 +126,10 @@ fun ProviderConfigureLiteRT(
     val installed by prefs.installedModelsFlow(LocalRuntime.LiteRT).collectAsState(initial = emptyMap())
     val modelAccelerators by prefs.modelAcceleratorsFlow(LocalRuntime.LiteRT).collectAsState(initial = emptyMap())
     val activeBackend by runtime.backendStatus.collectAsState()
-    val contextOverride by prefs.maxNumTokensOverrideFlow(LocalRuntime.LiteRT).collectAsState(initial = null)
-    var tokenField by remember(contextOverride) { mutableStateOf(contextOverride?.toString().orEmpty()) }
+    val runSettings by prefs.liteRtRuntimeSettingsFlow(LocalRuntime.LiteRT).collectAsState(initial = null)
+    var tokenField by remember(runSettings) { mutableStateOf(runSettings?.maxNumTokensOverride?.toString().orEmpty()) }
+    var systemMessageField by remember(runSettings) { mutableStateOf((runSettings?.systemMessageCharLimit ?: 500).toString()) }
+    var idleMinutesField by remember(runSettings) { mutableStateOf((runSettings?.idleTeardownMinutes ?: 5).toString()) }
     var url by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -202,48 +244,81 @@ fun ProviderConfigureLiteRT(
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("上下文长度", style = MaterialTheme.typography.titleMedium)
+            Text("模型运行设置", style = MaterialTheme.typography.titleMedium)
             Text(
-                "maxNumTokens（留空使用模型默认值）",
+                "配置上下文、系统消息及模型释放策略",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = tokenField,
-                    onValueChange = { tokenField = it.filter(Char::isDigit) },
-                    label = { Text("maxNumTokens") },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    enabled = !busy,
-                )
-                OutlinedButton(
-                    onClick = {
-                        submit(LiteRtConfigSection.CONTEXT) {
-                            val value = tokenField.takeIf(String::isNotBlank)?.toIntOrNull()
-                            require(tokenField.isBlank() || (value != null && value in 128..32768)) {
-                                "请输入 128–32768，或留空"
-                            }
-                            prefs.setMaxNumTokensOverride(LocalRuntime.LiteRT, value)
-                            runtime.closeIfLoaded() // New EngineConfig takes effect on next request.
-                            status = "上下文设置已应用；下次加载模型时生效"
+            HorizontalDivider()
+            LiteRtNumericSettingRow(
+                title = "上下文长度",
+                description = "模型的最大上下文长度；留空使用模型默认值。",
+                value = tokenField,
+                onValueChange = { tokenField = it },
+                placeholder = "默认",
+                unit = "Token",
+                enabled = !busy && runSettings != null,
+            )
+            HorizontalDivider()
+            LiteRtNumericSettingRow(
+                title = "系统消息长度上限",
+                description = "限制发送给本地模型的系统消息长度，超出部分将被截断。",
+                value = systemMessageField,
+                onValueChange = { systemMessageField = it },
+                unit = "字符",
+                enabled = !busy && runSettings != null,
+            )
+            HorizontalDivider()
+            LiteRtNumericSettingRow(
+                title = "模型空闲释放时间",
+                description = "空闲达到该时间后释放模型与 KV Cache；0 表示不自动释放。",
+                value = idleMinutesField,
+                onValueChange = { idleMinutesField = it },
+                unit = "分钟",
+                enabled = !busy && runSettings != null,
+            )
+            Button(
+                onClick = {
+                    submit(LiteRtConfigSection.CONTEXT) {
+                        val tokens = tokenField.takeIf(String::isNotBlank)?.toIntOrNull()
+                        require(tokenField.isBlank() || (tokens != null && tokens in 128..32768)) {
+                            "上下文长度请输入 128–32768，或留空"
                         }
-                    },
-                    enabled = !busy,
-                ) { Text("应用") }
-            }
+                        val systemLimit = systemMessageField.toIntOrNull()
+                        require(systemLimit != null && systemLimit in 1..32768) {
+                            "系统消息长度上限请输入 1–32768"
+                        }
+                        val idleMinutes = idleMinutesField.toIntOrNull()
+                        require(idleMinutes != null && idleMinutes in 0..10080) {
+                            "空闲释放时间请输入 0–10080 分钟（0 为不自动释放）"
+                        }
+                        val contextChanged = runSettings?.maxNumTokensOverride != tokens
+                        prefs.setLiteRtRuntimeSettings(
+                            LocalRuntime.LiteRT,
+                            LiteRtRuntimeSettings(
+                                maxNumTokensOverride = tokens,
+                                systemMessageCharLimit = systemLimit,
+                                idleTeardownMinutes = idleMinutes,
+                            ),
+                        )
+                        // EngineConfig contains the token limit. System-message changes
+                        // only invalidate the Conversation key on the next request;
+                        // retention updates are observed by LiteRtRuntime's DataStore flow.
+                        if (contextChanged) runtime.closeIfLoaded()
+                        status = if (contextChanged) {
+                            "设置已保存；新上下文长度将在下次加载模型时生效"
+                        } else {
+                            "模型运行设置已保存"
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy && runSettings != null,
+            ) { Text("应用设置") }
             if (statusSection == LiteRtConfigSection.CONTEXT) status?.let { Text(it) }
-            Text(
-                "实际运行的上下文不会超过模型文件自身的缓存上限。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 

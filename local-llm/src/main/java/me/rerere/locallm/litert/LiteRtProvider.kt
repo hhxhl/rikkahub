@@ -24,6 +24,16 @@ import com.google.ai.edge.litertlm.ToolProvider
 
 private const val TAG = "LiteRtProvider"
 
+/** Apply the user-configured SYSTEM-message character cap before prompt budgeting. */
+internal fun truncateLocalSystemText(text: String, charLimit: Int): String {
+    require(charLimit > 0)
+    return if (text.length > charLimit) {
+        text.take(charLimit) + "\n…(truncated for local model context)"
+    } else {
+        text
+    }
+}
+
 /**
  * Outcome of [decideImageForwarding]: whether to hand image bytes to the runtime this turn,
  * and whether the user's attached images were dropped in a way that warrants a chat note.
@@ -199,7 +209,8 @@ class LiteRtProvider(
         )
 
         // User-set max-context override: never beyond the identified file cache ceiling.
-        val maxNumTokensOverride = prefs.maxNumTokensOverride(LocalRuntime.LiteRT)
+        val runtimeSettings = prefs.liteRtRuntimeSettings(LocalRuntime.LiteRT)
+        val maxNumTokensOverride = runtimeSettings.maxNumTokensOverride
         val requestedMaxNumTokens = maxNumTokensOverride ?: config.maxTokens
         val effectiveMaxNumTokens = engineContextTokens(requestedMaxNumTokens, contextCeiling)
         if (contextCeiling != null && requestedMaxNumTokens > contextCeiling) {
@@ -222,8 +233,8 @@ class LiteRtProvider(
         //
         // For LiteRT we therefore:
         //  - Use [buildCompactPrefix] (one-line `- name: desc` per tool, NO schemas).
-        //  - Drop bulky auto-loaded skill bodies — keep at most the first
-        //    [SYSTEM_MESSAGE_CHAR_BUDGET] chars of system text (room for the user's
+        //  - Drop bulky auto-loaded skill bodies — keep at most the user-configured
+        //    system-message char limit (room for the user's
         //    custom system prompt + a short identity line, not for skill prose).
         //
         // A 1.5B model can't usefully consume agent-core's persona docs anyway — the
@@ -235,11 +246,8 @@ class LiteRtProvider(
             }
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
-        val trimmedSystemTexts = if (systemTextsRaw.length > SYSTEM_MESSAGE_CHAR_BUDGET) {
-            systemTextsRaw.take(SYSTEM_MESSAGE_CHAR_BUDGET) + "\n…(truncated for local model context)"
-        } else {
-            systemTextsRaw
-        }
+        val systemMessageCharLimit = runtimeSettings.systemMessageCharLimit
+        val trimmedSystemTexts = truncateLocalSystemText(systemTextsRaw, systemMessageCharLimit)
 
         // Native tool calling. Every declared tool is handed to the runtime under its real
         // name with its real JSON schema (see [LiteRtToolDeclaration]), so the model calls
@@ -684,12 +692,6 @@ class LiteRtProvider(
         private const val VISION_DROPPED_NOTE =
             "[Note: this model's vision encoder is unavailable on this device, so attached " +
                 "images were not analysed. Replying from text only.]\n\n"
-
-        /** Hard char-cap for the joined SYSTEM-message text. Tight on purpose: we
-         *  want the user's actual system prompt ("You are X") to land, but NOT
-         *  agent-core's auto-loaded skill body (~3-5k tokens of persona + tool
-         *  docs that small models can't usefully consume). 500 chars ≈ 125 tokens. */
-        private const val SYSTEM_MESSAGE_CHAR_BUDGET = 500
 
         /** Per-tool allowance for chat-template framing that is not present in JSON. */
         private const val TOOL_OVERHEAD_BYTES = 48

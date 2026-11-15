@@ -160,3 +160,25 @@ class LiteRtEngineContextTokensTest {
             systemBytes + toolBytes + historyBytes)
     }
 }
+
+/** The message cap is user-configurable, rather than always hard-coded to 500. */
+class LiteRtSystemMessageLimitTest {
+    @Test
+    fun `500-character default truncates a longer system message`() {
+        val text = "a".repeat(700)
+        val result = truncateLocalSystemText(text, 500)
+        assertTrue(result.startsWith("a".repeat(500)))
+        assertTrue(result.contains("truncated for local model context"))
+    }
+
+    @Test
+    fun `larger user limit retains the same system message intact`() {
+        val text = "a".repeat(700)
+        assertEquals(text, truncateLocalSystemText(text, 1000))
+    }
+
+    @Test
+    fun `short system message is unchanged`() {
+        assertEquals("你好", truncateLocalSystemText("你好", 500))
+    }
+}

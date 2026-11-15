@@ -31,7 +31,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -40,6 +43,8 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
+import me.rerere.locallm.LocalRuntime
+import me.rerere.locallm.LocalRuntimePreferences
 
 /** Role labels used in [Turn] signatures. Kept as plain strings so [turnSignature] is a
  *  pure function the provider and the runtime can both call without sharing an enum. */
@@ -176,7 +181,10 @@ class LiteRtVisionUnavailableException(
  * A single [mutex] serialises all access. The mutex is held for the full duration of each
  * inference, so [LoadedModel.processed] is only ever touched by one coroutine at a time.
  */
-class LiteRtRuntime(private val context: Context) {
+class LiteRtRuntime(
+    private val context: Context,
+    private val prefs: LocalRuntimePreferences,
+) {
 
     /** The last successfully initialized normal-chat Engine, not the selected preference.
      * Null means no chat Engine is resident (including while Benchmark is running).
@@ -237,7 +245,7 @@ class LiteRtRuntime(private val context: Context) {
     // CPU). Configurable per-runtime via [setIdleTeardownDelayMs]; pass 0 to disable.
 
     @Volatile
-    private var idleTeardownDelayMs: Long = TimeUnit.MINUTES.toMillis(15)
+    private var idleTeardownDelayMs: Long = TimeUnit.MINUTES.toMillis(5)
 
     @Volatile
     private var idleTeardownJob: kotlinx.coroutines.Job? = null
@@ -245,6 +253,21 @@ class LiteRtRuntime(private val context: Context) {
     private val idleScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.SupervisorJob() + Dispatchers.IO
     )
+
+    init {
+        // Restore the user's retention setting even if the app was restarted before any
+        // settings page was opened. Changes made via Apply are observed automatically.
+        idleScope.launch {
+            prefs.liteRtRuntimeSettingsFlow(LocalRuntime.LiteRT)
+                .map { it.idleTeardownMinutes }
+                .distinctUntilChanged()
+                .collect { minutes ->
+                    mutex.withLock {
+                        setIdleTeardownDelayMs(TimeUnit.MINUTES.toMillis(minutes.toLong()))
+                    }
+                }
+        }
+    }
 
     /** Set the idle window. 0 disables the watchdog (engine stays warm until manually
      *  closed). Negative values are clamped to 0. Honored on the next idle event. */
