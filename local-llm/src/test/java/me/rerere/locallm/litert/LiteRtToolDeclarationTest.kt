@@ -44,6 +44,24 @@ class LiteRtToolDeclarationTest {
         assertEquals("Fetch a URL", json["description"]?.jsonPrimitive?.content)
     }
 
+
+    @Test
+    fun `LiteRT search declaration does not expose online examples`() {
+        val json = describe(tool(name = "search_web", description =
+            "Full online format: [citation,example.com](abc123) and items[].images[]"))
+        val desc = json["description"]!!.jsonPrimitive.content
+        assertFalse(desc.contains("example.com"))
+        assertFalse(desc.contains("items[]"))
+        assertTrue(desc.contains("Search the web"))
+    }
+
+    @Test
+    fun `LiteRT compacting does not alter other tool declarations`() {
+        val json = describe(tool(name = "termux_run_command", description =
+            "Run a shell command after approval"))
+        assertEquals("Run a shell command after approval", json["description"]!!.jsonPrimitive.content)
+    }
+
     @Test
     fun `parameters are emitted as a JSON-Schema object with properties and required`() {
         val params = describe(tool())["parameters"]!!.jsonObject

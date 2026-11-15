@@ -556,7 +556,9 @@ class LiteRtProvider(
                                     .filterIsInstance<UIMessagePart.Text>()
                                     .joinToString("") { it.text }
                                 if (outText.isNotEmpty()) {
-                                    append("\n<tool_result>").append(outText).append("</tool_result>")
+                                    append("\n<tool_result>")
+                                        .append(compactLocalToolOutput(part.toolName, outText))
+                                        .append("</tool_result>")
                                 }
                             }
                         }

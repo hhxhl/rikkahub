@@ -37,6 +37,21 @@ private const val TAG = "LiteRtToolDeclaration"
  * local model could invoke a destructive tool with no prompt and no HARDLINE check, and its
  * calls never appeared in the transcript as tool steps.
  */
+/**
+ * LiteRT-only descriptions: short enough for small local models and without example answers.
+ * The shared RikkaHub tool (including its cloud-provider description) is never modified.
+ */
+internal fun localToolDescription(name: String, cloudDescription: String): String = when (name) {
+    "search_web" ->
+        "Search the web for current news, latest releases and facts that need verification. " +
+            "Use the actual returned titles and URLs. Never invent sources or search results."
+    "scrape_web" ->
+        "Read a web page at the supplied URL to verify details or retrieve page content."
+    "get_time_info" ->
+        "Get the current device date, local time and timezone. Use for questions about now."
+    else -> cloudDescription
+}
+
 internal class LiteRtToolDeclaration(private val tool: RikkaTool) : OpenApiTool {
 
     /**
@@ -46,7 +61,7 @@ internal class LiteRtToolDeclaration(private val tool: RikkaTool) : OpenApiTool 
     val declarationJson: String by lazy {
         buildJsonObject {
             put("name", tool.name)
-            put("description", tool.description)
+            put("description", localToolDescription(tool.name, tool.description))
             put("parameters", parametersSchema())
         }.toString()
     }
