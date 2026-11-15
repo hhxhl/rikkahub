@@ -103,6 +103,25 @@ class LiteRtToolDeclarationBudgetTest {
     }
 
     @Test
+    fun `default threshold still blocks native tools at 1280 tokens`() {
+        assertEquals(0, LiteRtProvider.toolDeclarationByteBudget(1280, 500, 25, 1280))
+        assertTrue(LiteRtProvider.toolDeclarationByteBudget(1281, 500, 25, 1280) > 0)
+    }
+
+    @Test
+    fun `zero threshold allows tools when declaration budget has space`() {
+        val budget = LiteRtProvider.toolDeclarationByteBudget(1280, 500, 25, 0)
+        assertEquals(614, budget)
+        assertEquals(0, LiteRtProvider.toolDeclarationByteBudget(1280, 2000, 25, 0))
+    }
+
+    @Test
+    fun `custom threshold suppresses tools even above former 1280 cutoff`() {
+        assertEquals(0, LiteRtProvider.toolDeclarationByteBudget(2048, 500, 25, 2048))
+        assertTrue(LiteRtProvider.toolDeclarationByteBudget(2049, 500, 25, 2048) > 0)
+    }
+
+    @Test
     fun `tool and history budgets stay within current Engine allocation`() {
         val budget = LiteRtProvider.promptByteBudget(8192)
         val system = 780

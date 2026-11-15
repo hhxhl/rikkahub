@@ -21,6 +21,7 @@ data class LiteRtRuntimeSettings(
     val maxNumTokensOverride: Int? = null,
     val systemMessageCharLimit: Int = 500,
     val responseReservePercent: Int = 25,
+    val toolEnableThresholdTokens: Int = 1280,
     val idleTeardownMinutes: Int = 5,
 )
 
@@ -211,6 +212,7 @@ class LocalRuntimePreferences(private val context: Context) {
                 maxNumTokensOverride = values[maxNumTokensOverrideKey(runtime)],
                 systemMessageCharLimit = values[systemMessageCharLimitKey(runtime)] ?: 500,
                 responseReservePercent = values[responseReservePercentKey(runtime)] ?: 25,
+                toolEnableThresholdTokens = values[toolEnableThresholdTokensKey(runtime)] ?: 1280,
                 idleTeardownMinutes = values[idleTeardownMinutesKey(runtime)] ?: 5,
             )
         }
@@ -222,6 +224,7 @@ class LocalRuntimePreferences(private val context: Context) {
         require(settings.maxNumTokensOverride == null || settings.maxNumTokensOverride in 128..32768)
         require(settings.systemMessageCharLimit in 1..32768)
         require(settings.responseReservePercent in 10..75)
+        require(settings.toolEnableThresholdTokens in 0..32768)
         require(settings.idleTeardownMinutes in 0..10080)
         context.localRuntimeDataStore.edit { values ->
             if (settings.maxNumTokensOverride == null) {
@@ -231,6 +234,7 @@ class LocalRuntimePreferences(private val context: Context) {
             }
             values[systemMessageCharLimitKey(runtime)] = settings.systemMessageCharLimit
             values[responseReservePercentKey(runtime)] = settings.responseReservePercent
+            values[toolEnableThresholdTokensKey(runtime)] = settings.toolEnableThresholdTokens
             values[idleTeardownMinutesKey(runtime)] = settings.idleTeardownMinutes
         }
     }
@@ -240,6 +244,9 @@ class LocalRuntimePreferences(private val context: Context) {
 
     private fun responseReservePercentKey(runtime: LocalRuntime) =
         intPreferencesKey("response_reserve_percent_${runtime.displayName}")
+
+    private fun toolEnableThresholdTokensKey(runtime: LocalRuntime) =
+        intPreferencesKey("tool_enable_threshold_tokens_${runtime.displayName}")
 
     private fun idleTeardownMinutesKey(runtime: LocalRuntime) =
         intPreferencesKey("idle_teardown_minutes_${runtime.displayName}")

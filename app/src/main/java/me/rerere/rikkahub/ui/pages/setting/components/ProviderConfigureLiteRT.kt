@@ -130,6 +130,7 @@ fun ProviderConfigureLiteRT(
     var tokenField by remember(runSettings) { mutableStateOf(runSettings?.maxNumTokensOverride?.toString().orEmpty()) }
     var systemMessageField by remember(runSettings) { mutableStateOf((runSettings?.systemMessageCharLimit ?: 500).toString()) }
     var reservePercentField by remember(runSettings) { mutableStateOf((runSettings?.responseReservePercent ?: 25).toString()) }
+    var toolThresholdField by remember(runSettings) { mutableStateOf((runSettings?.toolEnableThresholdTokens ?: 1280).toString()) }
     var idleMinutesField by remember(runSettings) { mutableStateOf((runSettings?.idleTeardownMinutes ?: 5).toString()) }
     var url by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -283,6 +284,15 @@ fun ProviderConfigureLiteRT(
             )
             HorizontalDivider()
             LiteRtNumericSettingRow(
+                title = "工具启用阈值",
+                description = "上下文不超过此值时禁用原生工具；0 表示不按长度禁用，仍受工具声明预算限制。",
+                value = toolThresholdField,
+                onValueChange = { toolThresholdField = it },
+                unit = "Token",
+                enabled = !busy && runSettings != null,
+            )
+            HorizontalDivider()
+            LiteRtNumericSettingRow(
                 title = "模型空闲释放时间",
                 description = "空闲达到该时间后释放模型与 KV Cache；0 表示不自动释放。",
                 value = idleMinutesField,
@@ -305,6 +315,10 @@ fun ProviderConfigureLiteRT(
                         require(reservePercent != null && reservePercent in 10..75) {
                             "回复预留比例请输入 10–75%（至少预留 256 Token）"
                         }
+                        val toolThreshold = toolThresholdField.toIntOrNull()
+                        require(toolThreshold != null && toolThreshold in 0..32768) {
+                            "工具启用阈值请输入 0–32768 Token（0 为取消固定阈值）"
+                        }
                         val idleMinutes = idleMinutesField.toIntOrNull()
                         require(idleMinutes != null && idleMinutes in 0..10080) {
                             "空闲释放时间请输入 0–10080 分钟（0 为不自动释放）"
@@ -316,11 +330,12 @@ fun ProviderConfigureLiteRT(
                                 maxNumTokensOverride = tokens,
                                 systemMessageCharLimit = systemLimit,
                                 responseReservePercent = reservePercent,
+                                toolEnableThresholdTokens = toolThreshold,
                                 idleTeardownMinutes = idleMinutes,
                             ),
                         )
-                        // EngineConfig contains the token limit; reserve-ratio changes
-                        // affect prompt budgeting on the next request without reloading.
+                        // EngineConfig contains the token limit. Reserve-ratio and tool-threshold
+                        // changes affect prompt/tool budgeting on the next request without reloading.
                         // System-message changes invalidate the Conversation key on the
                         // next request; retention updates are observed by the runtime.
                         if (contextChanged) runtime.closeIfLoaded()

@@ -268,7 +268,10 @@ class LiteRtProvider(
         val combinedSystem = trimmedSystemTexts.trim()
         val systemBytes = combinedSystem.toByteArray(Charsets.UTF_8).size
         val reservePercent = runtimeSettings.responseReservePercent
-        val toolByteBudget = toolDeclarationByteBudget(contextTokens, systemBytes, reservePercent)
+        val toolThreshold = runtimeSettings.toolEnableThresholdTokens
+        val toolByteBudget = toolDeclarationByteBudget(
+            contextTokens, systemBytes, reservePercent, toolThreshold,
+        )
         var toolBytesUsed = 0
         val droppedTools = mutableListOf<String>()
         val declarations = params.tools.mapNotNull { tool ->
@@ -287,7 +290,8 @@ class LiteRtProvider(
             Log.i(
                 TAG,
                 "declared ${nativeTools.size}/${params.tools.size} tool(s) natively, " +
-                    "$toolBytesUsed/$toolByteBudget bytes (context ${contextTokens}t)",
+                    "$toolBytesUsed/$toolByteBudget bytes " +
+                    "(context ${contextTokens}t, threshold ${toolThreshold}t)",
             )
         }
         // Never drop tools silently: an assistant with a large enabled set on a small model
@@ -712,14 +716,17 @@ class LiteRtProvider(
             return (available.toLong() * 2).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         }
 
-        /** Keep at least half of the remaining input bytes for actual dialogue;
-         *  tiny <= 1280-token models should not get expensive native tool schemas. */
+        /** Keep at least half of the remaining input bytes for actual dialogue.
+         *  The user-configurable threshold defaults to 1280 to preserve the original
+         *  protection for tiny models; 0 disables only that cutoff, not byte budgeting. */
         internal fun toolDeclarationByteBudget(
             contextTokens: Int,
             systemBytes: Int,
             responseReservePercent: Int = 25,
+            toolEnableThresholdTokens: Int = 1280,
         ): Int {
-            if (contextTokens <= 1280) return 0
+            require(toolEnableThresholdTokens in 0..32768)
+            if (toolEnableThresholdTokens > 0 && contextTokens <= toolEnableThresholdTokens) return 0
             val remaining = (promptByteBudget(contextTokens, responseReservePercent) - systemBytes).coerceAtLeast(0)
             return remaining / 2
         }
