@@ -77,7 +77,7 @@ object BingSearchService : SearchService<SearchServiceOptions.BingLocalOptions> 
                 "Search failed: no results found"
             }
 
-            SearchResult(items = results)
+            SearchResult(items = results.take(commonOptions.resultSize.coerceAtLeast(1)))
         }
     }
 
