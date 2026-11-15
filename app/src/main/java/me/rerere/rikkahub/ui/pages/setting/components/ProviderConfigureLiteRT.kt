@@ -129,6 +129,7 @@ fun ProviderConfigureLiteRT(
     val runSettings by prefs.liteRtRuntimeSettingsFlow(LocalRuntime.LiteRT).collectAsState(initial = null)
     var tokenField by remember(runSettings) { mutableStateOf(runSettings?.maxNumTokensOverride?.toString().orEmpty()) }
     var systemMessageField by remember(runSettings) { mutableStateOf((runSettings?.systemMessageCharLimit ?: 500).toString()) }
+    var reservePercentField by remember(runSettings) { mutableStateOf((runSettings?.responseReservePercent ?: 25).toString()) }
     var idleMinutesField by remember(runSettings) { mutableStateOf((runSettings?.idleTeardownMinutes ?: 5).toString()) }
     var url by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -248,7 +249,7 @@ fun ProviderConfigureLiteRT(
         ) {
             Text("模型运行设置", style = MaterialTheme.typography.titleMedium)
             Text(
-                "配置上下文、系统消息及模型释放策略",
+                "配置上下文、回复预留、系统消息及模型释放策略",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -273,6 +274,15 @@ fun ProviderConfigureLiteRT(
             )
             HorizontalDivider()
             LiteRtNumericSettingRow(
+                title = "回复预留比例",
+                description = "从上下文中为本轮回复预留空间（至少 256 Token），不等于实际回复长度上限。",
+                value = reservePercentField,
+                onValueChange = { reservePercentField = it },
+                unit = "%",
+                enabled = !busy && runSettings != null,
+            )
+            HorizontalDivider()
+            LiteRtNumericSettingRow(
                 title = "模型空闲释放时间",
                 description = "空闲达到该时间后释放模型与 KV Cache；0 表示不自动释放。",
                 value = idleMinutesField,
@@ -291,6 +301,10 @@ fun ProviderConfigureLiteRT(
                         require(systemLimit != null && systemLimit in 1..32768) {
                             "系统消息长度上限请输入 1–32768"
                         }
+                        val reservePercent = reservePercentField.toIntOrNull()
+                        require(reservePercent != null && reservePercent in 10..75) {
+                            "回复预留比例请输入 10–75%（至少预留 256 Token）"
+                        }
                         val idleMinutes = idleMinutesField.toIntOrNull()
                         require(idleMinutes != null && idleMinutes in 0..10080) {
                             "空闲释放时间请输入 0–10080 分钟（0 为不自动释放）"
@@ -301,12 +315,14 @@ fun ProviderConfigureLiteRT(
                             LiteRtRuntimeSettings(
                                 maxNumTokensOverride = tokens,
                                 systemMessageCharLimit = systemLimit,
+                                responseReservePercent = reservePercent,
                                 idleTeardownMinutes = idleMinutes,
                             ),
                         )
-                        // EngineConfig contains the token limit. System-message changes
-                        // only invalidate the Conversation key on the next request;
-                        // retention updates are observed by LiteRtRuntime's DataStore flow.
+                        // EngineConfig contains the token limit; reserve-ratio changes
+                        // affect prompt budgeting on the next request without reloading.
+                        // System-message changes invalidate the Conversation key on the
+                        // next request; retention updates are observed by the runtime.
                         if (contextChanged) runtime.closeIfLoaded()
                         status = if (contextChanged) {
                             "设置已保存；新上下文长度将在下次加载模型时生效"

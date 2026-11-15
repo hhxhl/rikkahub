@@ -267,7 +267,8 @@ class LiteRtProvider(
         val contextTokens = effectiveMaxNumTokens
         val combinedSystem = trimmedSystemTexts.trim()
         val systemBytes = combinedSystem.toByteArray(Charsets.UTF_8).size
-        val toolByteBudget = toolDeclarationByteBudget(contextTokens, systemBytes)
+        val reservePercent = runtimeSettings.responseReservePercent
+        val toolByteBudget = toolDeclarationByteBudget(contextTokens, systemBytes, reservePercent)
         var toolBytesUsed = 0
         val droppedTools = mutableListOf<String>()
         val declarations = params.tools.mapNotNull { tool ->
@@ -321,7 +322,7 @@ class LiteRtProvider(
             it.role != MessageRole.SYSTEM && it.role != MessageRole.TOOL
         }
         var coldBlob = renderColdBlob(trimmed)
-        val historyBudget = historyByteBudget(contextTokens, systemBytes, toolBytesUsed)
+        val historyBudget = historyByteBudget(contextTokens, systemBytes, toolBytesUsed, reservePercent)
         while (coldBlob.toByteArray(Charsets.UTF_8).size > historyBudget && trimmed.size > 1) {
             trimmed = trimmed.drop(1)
             coldBlob = renderColdBlob(trimmed)
@@ -343,7 +344,8 @@ class LiteRtProvider(
             TAG,
             "prefill budget: system=${systemBytes}B tools=${toolBytesUsed}B " +
                 "history=${historyBytes}B total=${prefillBytes}B " +
-                "(input byte cap=${promptByteBudget(contextTokens)}B, engine=${contextTokens}t)",
+                "(input byte cap=${promptByteBudget(contextTokens, reservePercent)}B, " +
+                    "reserve=${reservePercent}%, engine=${contextTokens}t)",
         )
 
         // Match Box: use the model's explicit vision configuration. A failed init is
@@ -696,21 +698,29 @@ class LiteRtProvider(
         /** Per-tool allowance for chat-template framing that is not present in JSON. */
         private const val TOOL_OVERHEAD_BYTES = 48
 
-        /** Conservative byte budget: reserve 25% (at least 256t) for output and another
-         *  96t for chat-template/native framing. UTF-8 bytes / 2 approximates an upper
+        /** Conservative byte budget: reserve the configured share (at least 256t) for
+         *  output and another 96t for chat-template/native framing. UTF-8 bytes / 2 approximates an upper
          *  token count for multilingual text more safely than 4 characters per token.
          *  This is still a heuristic, not a replacement for SDK tokenization. */
-        internal fun promptByteBudget(contextTokens: Int): Int {
-            val response = maxOf(256, contextTokens / 4)
+        internal fun promptByteBudget(contextTokens: Int, responseReservePercent: Int = 25): Int {
+            require(responseReservePercent in 10..75)
+            val response = maxOf(
+                256,
+                (contextTokens.toLong() * responseReservePercent / 100).toInt(),
+            )
             val available = (contextTokens - response - 96).coerceAtLeast(0)
             return (available.toLong() * 2).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         }
 
         /** Keep at least half of the remaining input bytes for actual dialogue;
          *  tiny <= 1280-token models should not get expensive native tool schemas. */
-        internal fun toolDeclarationByteBudget(contextTokens: Int, systemBytes: Int): Int {
+        internal fun toolDeclarationByteBudget(
+            contextTokens: Int,
+            systemBytes: Int,
+            responseReservePercent: Int = 25,
+        ): Int {
             if (contextTokens <= 1280) return 0
-            val remaining = (promptByteBudget(contextTokens) - systemBytes).coerceAtLeast(0)
+            val remaining = (promptByteBudget(contextTokens, responseReservePercent) - systemBytes).coerceAtLeast(0)
             return remaining / 2
         }
 
@@ -718,7 +728,8 @@ class LiteRtProvider(
             contextTokens: Int,
             systemBytes: Int,
             toolBytes: Int,
-        ): Int = (promptByteBudget(contextTokens) - systemBytes - toolBytes).coerceAtLeast(0)
+            responseReservePercent: Int = 25,
+        ): Int = (promptByteBudget(contextTokens, responseReservePercent) - systemBytes - toolBytes).coerceAtLeast(0)
 
         /**
          * The context the engine is actually configured with: what was asked for, clamped to

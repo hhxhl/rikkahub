@@ -20,6 +20,7 @@ private val Context.localRuntimeDataStore by preferencesDataStore(name = "local_
 data class LiteRtRuntimeSettings(
     val maxNumTokensOverride: Int? = null,
     val systemMessageCharLimit: Int = 500,
+    val responseReservePercent: Int = 25,
     val idleTeardownMinutes: Int = 5,
 )
 
@@ -202,13 +203,14 @@ class LocalRuntimePreferences(private val context: Context) {
         }
     }
 
-    /** The three fields are read together so the settings screen sees one consistent
+    /** The runtime fields are read together so the settings screen sees one consistent
      *  snapshot and the Apply action can save all values in a single DataStore edit. */
     fun liteRtRuntimeSettingsFlow(runtime: LocalRuntime): Flow<LiteRtRuntimeSettings> =
         context.localRuntimeDataStore.data.map { values ->
             LiteRtRuntimeSettings(
                 maxNumTokensOverride = values[maxNumTokensOverrideKey(runtime)],
                 systemMessageCharLimit = values[systemMessageCharLimitKey(runtime)] ?: 500,
+                responseReservePercent = values[responseReservePercentKey(runtime)] ?: 25,
                 idleTeardownMinutes = values[idleTeardownMinutesKey(runtime)] ?: 5,
             )
         }
@@ -219,6 +221,7 @@ class LocalRuntimePreferences(private val context: Context) {
     suspend fun setLiteRtRuntimeSettings(runtime: LocalRuntime, settings: LiteRtRuntimeSettings) {
         require(settings.maxNumTokensOverride == null || settings.maxNumTokensOverride in 128..32768)
         require(settings.systemMessageCharLimit in 1..32768)
+        require(settings.responseReservePercent in 10..75)
         require(settings.idleTeardownMinutes in 0..10080)
         context.localRuntimeDataStore.edit { values ->
             if (settings.maxNumTokensOverride == null) {
@@ -227,12 +230,16 @@ class LocalRuntimePreferences(private val context: Context) {
                 values[maxNumTokensOverrideKey(runtime)] = settings.maxNumTokensOverride
             }
             values[systemMessageCharLimitKey(runtime)] = settings.systemMessageCharLimit
+            values[responseReservePercentKey(runtime)] = settings.responseReservePercent
             values[idleTeardownMinutesKey(runtime)] = settings.idleTeardownMinutes
         }
     }
 
     private fun systemMessageCharLimitKey(runtime: LocalRuntime) =
         intPreferencesKey("system_message_chars_${runtime.displayName}")
+
+    private fun responseReservePercentKey(runtime: LocalRuntime) =
+        intPreferencesKey("response_reserve_percent_${runtime.displayName}")
 
     private fun idleTeardownMinutesKey(runtime: LocalRuntime) =
         intPreferencesKey("idle_teardown_minutes_${runtime.displayName}")

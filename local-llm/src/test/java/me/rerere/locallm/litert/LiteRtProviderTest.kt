@@ -182,3 +182,34 @@ class LiteRtSystemMessageLimitTest {
         assertEquals("你好", truncateLocalSystemText("你好", 500))
     }
 }
+
+/** Verify the configured output reserve is applied to system, tool and history budgets. */
+class LiteRtResponseReserveBudgetTest {
+    @Test
+    fun `25 percent preserves the previous 1280-token default`() {
+        assertEquals(1728, LiteRtProvider.promptByteBudget(1280, 25))
+        assertEquals(LiteRtProvider.promptByteBudget(1280), LiteRtProvider.promptByteBudget(1280, 25))
+    }
+
+    @Test
+    fun `larger reserve leaves less room for input and history`() {
+        val defaultBudget = LiteRtProvider.promptByteBudget(1280, 25)
+        val largerReserve = LiteRtProvider.promptByteBudget(1280, 40)
+        assertEquals(1344, largerReserve)
+        assertTrue(largerReserve < defaultBudget)
+        assertTrue(LiteRtProvider.historyByteBudget(1280, 300, 0, 40) <
+            LiteRtProvider.historyByteBudget(1280, 300, 0, 25))
+    }
+
+    @Test
+    fun `smaller reserve still protects minimum 256 output tokens`() {
+        assertEquals(1856, LiteRtProvider.promptByteBudget(1280, 10))
+        assertEquals(1856, LiteRtProvider.promptByteBudget(1280, 20))
+    }
+
+    @Test
+    fun `tool budgets also honor the configured reserve`() {
+        assertTrue(LiteRtProvider.toolDeclarationByteBudget(4096, 300, 40) <
+            LiteRtProvider.toolDeclarationByteBudget(4096, 300, 25))
+    }
+}
