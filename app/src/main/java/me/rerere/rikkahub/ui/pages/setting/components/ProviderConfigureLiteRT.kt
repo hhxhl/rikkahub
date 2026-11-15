@@ -164,6 +164,11 @@ fun ProviderConfigureLiteRT(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("运行时", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "推理后端与运行状态",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.surfaceVariant,
