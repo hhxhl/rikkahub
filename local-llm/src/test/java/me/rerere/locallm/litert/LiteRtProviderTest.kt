@@ -1,6 +1,8 @@
 package me.rerere.locallm.litert
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import me.rerere.ai.core.ReasoningLevel
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -17,6 +19,28 @@ import org.junit.Test
  * is still `true` at the moment of the doomed first load).
  */
 class LiteRtProviderTest {
+
+    @Test
+    fun `OFF disables native thinking without modifying tool availability`() {
+        val config = liteRtThinkingConfig(ReasoningLevel.OFF)!!
+        assertFalse(config.enableThinking)
+        assertEquals(0, config.thinkingTokenBudget)
+    }
+
+    @Test
+    fun `AUTO inherits model thinking defaults`() {
+        assertNull(liteRtThinkingConfig(ReasoningLevel.AUTO))
+    }
+
+    @Test
+    fun `explicit reasoning levels use RikkaHub native token budgets`() {
+        for (level in listOf(ReasoningLevel.LOW, ReasoningLevel.MEDIUM,
+            ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MAX)) {
+            val config = liteRtThinkingConfig(level)!!
+            assertTrue(config.enableThinking)
+            assertEquals(level.budgetTokens, config.thinkingTokenBudget)
+        }
+    }
 
     @Test
     fun `forwards images when vision is live post-load`() {

@@ -19,6 +19,7 @@ import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.ModelInfo
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ToolProvider
+import com.google.ai.edge.litertlm.ThinkingConfig
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -417,6 +418,8 @@ class LiteRtRuntime(
         val temperature: Double,
         /** Exact, ordered declaration JSON strings; changes require a fresh Conversation. */
         val toolDeclarations: List<String>,
+        /** Switching thinking mode invalidates the Conversation KV cache, not the Engine. */
+        val thinkingConfig: ThinkingConfig?,
     )
 
     /** Everything needed to (re)build a [Conversation] for the cold path without re-deriving
@@ -424,6 +427,7 @@ class LiteRtRuntime(
     private data class ConversationSpec(
         val systemInstruction: Contents?,
         val tools: List<ToolProvider>,
+        val thinkingConfig: ThinkingConfig?,
         val constrainedDecoding: Boolean,
         val topK: Int,
         val topP: Double,
@@ -640,6 +644,7 @@ class LiteRtRuntime(
         systemInstructionText: String? = null,
         tools: List<ToolProvider> = emptyList(),
         toolDeclarations: List<String> = emptyList(),
+        thinkingConfig: ThinkingConfig? = null,
         constrainedDecoding: Boolean = false,
         topK: Int = 64,
         topP: Double = 0.95,
@@ -684,10 +689,12 @@ class LiteRtRuntime(
             topP = topP,
             temperature = temperature,
             toolDeclarations = toolDeclarations.toList(),
+            thinkingConfig = thinkingConfig,
         )
         val desiredConversationSpec = ConversationSpec(
             systemInstruction = systemInstruction,
             tools = tools,
+            thinkingConfig = thinkingConfig,
             constrainedDecoding = constrainedDecoding,
             topK = topK,
             topP = topP,
@@ -983,6 +990,7 @@ class LiteRtRuntime(
                     systemInstruction = spec.systemInstruction,
                     initialMessages = initialMessages,
                     tools = spec.tools,
+                    thinkingConfig = spec.thinkingConfig,
                     // Surface tool calls instead of dispatching them. The SDK would happily
                     // run them itself, but that path skips the host's approval prompt, the
                     // auto-approve allowlist, the HARDLINE floor, and the per-turn

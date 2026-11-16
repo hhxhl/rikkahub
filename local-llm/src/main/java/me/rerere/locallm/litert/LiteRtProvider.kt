@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.Provider
@@ -21,8 +22,20 @@ import me.rerere.locallm.LocalRuntime
 import me.rerere.locallm.LocalRuntimePreferences
 import com.google.ai.edge.litertlm.tool as litertTool
 import com.google.ai.edge.litertlm.ToolProvider
+import com.google.ai.edge.litertlm.ThinkingConfig
 
 private const val TAG = "LiteRtProvider"
+
+/**
+ * Map RikkaHub's existing reasoning picker to the LiteRT-LM 0.19.1 native API.
+ * AUTO inherits the model's default instead of forcing thinking on or off.
+ * Positive budgets are the existing RikkaHub levels, not a new LiteRT setting.
+ */
+internal fun liteRtThinkingConfig(level: ReasoningLevel): ThinkingConfig? = when (level) {
+    ReasoningLevel.AUTO -> null
+    ReasoningLevel.OFF -> ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+    else -> ThinkingConfig(enableThinking = true, thinkingTokenBudget = level.budgetTokens)
+}
 
 /** Apply the user-configured SYSTEM-message character cap before prompt budgeting. */
 internal fun truncateLocalSystemText(text: String, charLimit: Int): String {
@@ -357,6 +370,10 @@ class LiteRtProvider(
 
         // ---- Engine load with full per-model + per-call config ----
         val requestId = java.util.UUID.randomUUID().toString()
+        val nativeThinking = liteRtThinkingConfig(params.reasoningLevel)
+        Log.i(TAG, "reasoning level=${params.reasoningLevel}, " +
+            "thinking=${nativeThinking?.enableThinking ?: "model-default"}, " +
+            "budget=${nativeThinking?.thinkingTokenBudget ?: "model-default"}")
         val outcome = try {
             runtime.ensureLoaded(
                 modelPath = modelPath,
@@ -376,6 +393,7 @@ class LiteRtProvider(
                 systemInstructionText = combinedSystem.ifBlank { null },
                 tools = nativeTools,
                 toolDeclarations = declarations.map { it.declarationJson },
+                thinkingConfig = nativeThinking,
                 // Constrained decoding ON when this turn carries tools — matches Gallery's
                 // tool-task behaviour. The SDK projects the model's output into the @Tool
                 // call grammar so Gemma actually invokes runTool(...) via the bridge
