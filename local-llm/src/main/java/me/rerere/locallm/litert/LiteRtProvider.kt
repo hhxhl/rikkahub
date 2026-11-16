@@ -317,6 +317,7 @@ class LiteRtProvider(
         var trimmed = messages.filter {
             it.role != MessageRole.SYSTEM && it.role != MessageRole.TOOL
         }
+        val untrimmedTurnCount = trimmed.size
         var coldBlob = renderColdBlob(trimmed)
         val historyBudget = historyByteBudget(contextTokens, systemBytes, toolBytesUsed, reservePercent)
         while (coldBlob.toByteArray(Charsets.UTF_8).size > historyBudget && trimmed.size > 1) {
@@ -324,6 +325,10 @@ class LiteRtProvider(
             if (next.size == trimmed.size) break  // no complete segment can be removed safely
             trimmed = next
             coldBlob = renderColdBlob(trimmed)
+        }
+        if (trimmed.size != untrimmedTurnCount) {
+            Log.i(TAG, "history trimmed: $untrimmedTurnCount -> ${trimmed.size} turns; " +
+                "dropped=${untrimmedTurnCount - trimmed.size}")
         }
         val historyBytes = coldBlob.toByteArray(Charsets.UTF_8).size
         if (historyBytes > historyBudget) {
@@ -612,7 +617,27 @@ class LiteRtProvider(
             MessageRole.ASSISTANT -> ROLE_ASSISTANT
             else -> "other"
         }
-        return Turn(turnRole, renderTurnRawText(this))
+        val replayParts = if (this.role == MessageRole.ASSISTANT) {
+            parts.mapNotNull { part ->
+                when (part) {
+                    is UIMessagePart.Text -> NativeReplayPart.Text(part.text)
+                    is UIMessagePart.Notice -> NativeReplayPart.Text(part.text)
+                    is UIMessagePart.Tool -> {
+                        val outputText = part.output.filterIsInstance<UIMessagePart.Text>()
+                            .joinToString("") { it.text }
+                        NativeReplayPart.Tool(
+                            name = part.toolName,
+                            argumentsJson = part.input.ifBlank { "{}" },
+                            output = if (part.isExecuted && outputText.isNotBlank()) {
+                                compactLocalToolOutput(part.toolName, outputText)
+                            } else null,
+                        )
+                    }
+                    else -> null
+                }
+            }
+        } else emptyList()
+        return Turn(turnRole, renderTurnRawText(this), replayParts)
     }
 
     /**

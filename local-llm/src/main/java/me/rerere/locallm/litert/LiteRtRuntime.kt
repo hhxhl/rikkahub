@@ -19,6 +19,8 @@ import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.ModelInfo
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ToolProvider
+import com.google.ai.edge.litertlm.ToolCall
+import com.google.ai.edge.litertlm.Role
 import com.google.ai.edge.litertlm.ThinkingConfig
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -26,6 +28,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -72,7 +77,19 @@ fun turnSignature(role: String, text: String): String = "$role|${text.length}|${
  * chat template applies role wrapping. Cold USER turns restore earlier turns as native
  * SDK Message.user/model items in ConversationConfig.initialMessages.
  */
-data class Turn(val role: String, val rawText: String) {
+/** Preserve the host's structured assistant content for native SDK Cold replay.
+ * Do not infer tool calls from arbitrary assistant text containing <tool_call> tags.
+ */
+sealed interface NativeReplayPart {
+    data class Text(val text: String) : NativeReplayPart
+    data class Tool(val name: String, val argumentsJson: String, val output: String?) : NativeReplayPart
+}
+
+data class Turn(
+    val role: String,
+    val rawText: String,
+    val nativeParts: List<NativeReplayPart> = emptyList(),
+) {
     val signature: String get() = turnSignature(role, rawText)
 }
 
@@ -156,6 +173,101 @@ internal fun matchNativeToolResults(
 private fun sameToolArguments(a: String, b: String): Boolean = runCatching {
     Json.parseToJsonElement(a) == Json.parseToJsonElement(b)
 }.getOrDefault(false)
+
+/** Diagnostic only: never loosen [matchNativeToolResults] to force a tool execution. */
+internal fun nativeToolMatchFailureReason(
+    pending: PendingToolBatch?,
+    history: List<Turn>,
+    supplied: List<RuntimeToolResult>,
+): String {
+    if (pending == null) return "pending-batch-missing"
+    if (pending.calls.isEmpty()) return "pending-batch-empty"
+    if (history.lastOrNull()?.role != ROLE_ASSISTANT) return "history-not-assistant-ending"
+    if (history.dropLast(1).map { it.signature } != pending.anchorSignatures) {
+        return "history-prefix-changed-or-trimmed"
+    }
+    if (supplied.map { it.id }.distinct().size != supplied.size) return "duplicate-result-id"
+    val byId = supplied.associateBy { it.id }
+    for (call in pending.calls) {
+        val result = byId[call.id] ?: return "result-id-missing"
+        if (call.name != result.name) return "tool-name-changed"
+        if (!sameToolArguments(call.argumentsJson, result.argumentsJson)) return "tool-arguments-changed"
+        if (result.output.isBlank()) return "empty-result"
+    }
+    return "unknown-mismatch"
+}
+
+/** Translate only structured host Tool parts into native LiteRT roles.
+ * Text-only assistant turns retain their original MODEL role.
+ * Unexecuted/malformed tool parts return null instead of inventing a tool result.
+ */
+internal fun nativeReplayHistory(history: List<Turn>): List<Message>? {
+    val result = mutableListOf<Message>()
+    for (turn in history) {
+        when (turn.role) {
+            ROLE_USER -> result.add(Message.user(turn.rawText))
+            ROLE_ASSISTANT -> {
+                if (turn.nativeParts.none { it is NativeReplayPart.Tool }) {
+                    result.add(Message.model(turn.rawText))
+                    continue
+                }
+                val pendingText = StringBuilder()
+                var i = 0
+                while (i < turn.nativeParts.size) {
+                    when (val part = turn.nativeParts[i]) {
+                        is NativeReplayPart.Text -> {
+                            pendingText.append(part.text)
+                            i++
+                        }
+                        is NativeReplayPart.Tool -> {
+                            val calls = mutableListOf<ToolCall>()
+                            val responses = mutableListOf<Content>()
+                            // Adjacent tool parts belong to the same MODEL tool-call batch.
+                            while (i < turn.nativeParts.size) {
+                                val tool = turn.nativeParts[i] as? NativeReplayPart.Tool ?: break
+                                val args = runCatching {
+                                    Json.parseToJsonElement(tool.argumentsJson).let { it as? JsonObject }
+                                }.getOrNull() ?: return null
+                                if (tool.name.isBlank() || tool.output.isNullOrBlank()) return null
+                                calls.add(ToolCall(tool.name, args.mapValues { (_, v) -> v.toToolValue() }))
+                                responses.add(Content.ToolResponse(tool.name, tool.output))
+                                i++
+                            }
+                            val textContents = if (pendingText.isEmpty()) {
+                                Contents.of(emptyList<Content>())
+                            } else Contents.of(pendingText.toString())
+                            result.add(Message.model(contents = textContents, toolCalls = calls))
+                            result.add(Message.tool(Contents.of(responses)))
+                            pendingText.clear()
+                        }
+                    }
+                }
+                if (pendingText.isNotEmpty()) result.add(Message.model(pendingText.toString()))
+            }
+            else -> return null
+        }
+    }
+    return result
+}
+
+private fun JsonElement.toToolValue(): Any? = when (this) {
+    JsonNull -> null
+    is JsonObject -> mapValues { (_, value) -> value.toToolValue() }
+    is JsonArray -> map { it.toToolValue() }
+    is JsonPrimitive -> if (isString) content else booleanOrNull ?: longOrNull ?: doubleOrNull ?: content
+}
+
+/** Rebuild a TOOL-ending assistant turn with real MODEL(toolCalls) -> TOOL roles.
+ * The final TOOL message must be sent through sendMessageAsync, not prefilled twice.
+ */
+internal fun nativeColdToolContinuation(history: List<Turn>): Pair<List<Message>, Message>? {
+    if (history.lastOrNull()?.role != ROLE_ASSISTANT) return null
+    val messages = nativeReplayHistory(history) ?: return null
+    if (messages.size < 2 || messages.last().role != Role.TOOL ||
+        messages[messages.lastIndex - 1].toolCalls.isEmpty()
+    ) return null
+    return messages.dropLast(1) to messages.last()
+}
 
 /** Use the public 0.19.1 TOOL-role API; no hand-written <tool_result> wrappers. */
 internal fun nativeToolResponseMessage(results: List<RuntimeToolResult>): Message = Message.tool(
@@ -1121,6 +1233,19 @@ class LiteRtRuntime(
             val nativeToolResults = if (!hasMedia) {
                 matchNativeToolResults(instance.pendingToolBatch, history, toolResults)
             } else null
+            if (toolResults.isNotEmpty() && nativeToolResults == null) {
+                android.util.Log.w(
+                    "LiteRtRuntime",
+                    "streamTurns: native TOOL continuation unavailable: " +
+                        nativeToolMatchFailureReason(instance.pendingToolBatch, history, toolResults) +
+                        "; hostTurns=${history.size}; results=${toolResults.size}",
+                )
+            }
+            // Construct a role-correct Cold fallback only for actual executed tool parts.
+            // Never parse tool-looking text generated by the model into executable calls.
+            val coldToolReplay = if (nativeToolResults == null && !hasMedia && toolResults.isNotEmpty()) {
+                nativeColdToolContinuation(history)
+            } else null
             val planned = planTurns(instance.processed, historySignatures, hasMedia)
             // Only a newly appended USER can be submitted as a user message.
             val plan = if (planned is TurnPlan.Warm &&
@@ -1139,16 +1264,16 @@ class LiteRtRuntime(
                     history[plan.sendFromIndex].rawText
                 }
                 TurnPlan.Cold -> {
-                    // Ordinary text conversations use the SDK's real message roles,
-                    // matching Gallery: old turns go into initialMessages; only the
-                    // newest USER turn is submitted through sendMessageAsync.
-                    // Non-user-ending agent/tool continuations retain the old fallback
-                    // until tool responses can be reconstructed as SDK ToolResponse.
-                    val nativeHistory = nativeInitialHistory(history)
-                    val nativeSignatures = if (nativeHistory != null) {
+                    // Both normal Cold and tool-result Cold use real SDK roles.
+                    // The compatibility text blob remains for unsupported non-tool agent turns.
+                    val nativeHistory = coldToolReplay?.first ?: nativeInitialHistory(history)
+                    val nativeSignatures = if (nativeHistory != null && coldToolReplay == null) {
                         history.dropLast(1).map { it.signature }
                     } else emptyList()
-                    val canReusePristine = instance.pristineConversation &&
+                    // TOOL replay injects a different initialMessages list; even a pristine
+                    // empty Conversation must be rebuilt before submitting its TOOL reply.
+                    val canReusePristine = coldToolReplay == null &&
+                        instance.pristineConversation &&
                         instance.initialHistorySignatures == nativeSignatures
                     if (!canReusePristine) {
                         recreateConversationLocked(instance, nativeHistory.orEmpty())
@@ -1161,7 +1286,15 @@ class LiteRtRuntime(
                         android.util.Log.d("LiteRtRuntime", "streamTurns: Cold pristine Conversation with matching prefix")
                     }
                     instance.processed.clear()
-                    if (nativeHistory != null) history.last().rawText else coldBlob
+                    if (coldToolReplay != null) {
+                        android.util.Log.i(
+                            "LiteRtRuntime",
+                            "streamTurns: Cold native TOOL replay; initialMessages=${nativeHistory?.size ?: 0}",
+                        )
+                    } else if (nativeHistory == null) {
+                        android.util.Log.w("LiteRtRuntime", "streamTurns: unsupported Cold fallback to plain text history")
+                    }
+                    if (coldToolReplay != null) "" else if (nativeHistory != null) history.last().rawText else coldBlob
                 }
             }
 
@@ -1174,10 +1307,10 @@ class LiteRtRuntime(
             for (image in images) contentList.add(Content.ImageBytes(image.toPngByteArray()))
             for (clip in audioClips) contentList.add(Content.AudioBytes(clip))
             if (inputText.trim().isNotEmpty()) contentList.add(Content.Text(inputText))
-            val inputMessage = if (nativeToolResults != null) {
-                nativeToolResponseMessage(nativeToolResults)
-            } else {
-                Message.user(Contents.of(contentList))
+            val inputMessage = when {
+                nativeToolResults != null -> nativeToolResponseMessage(nativeToolResults)
+                coldToolReplay != null -> coldToolReplay.second
+                else -> Message.user(Contents.of(contentList))
             }
             // Consumed (or invalidated) before sending: a failed/cancelled call may not
             // replay the same results into a partially-mutated native Conversation.
@@ -1231,7 +1364,7 @@ class LiteRtRuntime(
                         instance.processed.clear()
                         instance.completedToolTurn = null
                         if (!cancellationRequested.get()) {
-                            if (nativeToolResults == null) {
+                            if (nativeToolResults == null && coldToolReplay == null) {
                                 // Ordinary turns are represented in RikkaHub as one newly
                                 // appended assistant message; regular Warm behaviour is safe.
                                 instance.processed.addAll(historySignatures)
@@ -1413,13 +1546,7 @@ class LiteRtRuntime(
          */
         internal fun nativeInitialHistory(history: List<Turn>): List<Message>? {
             if (history.lastOrNull()?.role != ROLE_USER) return null
-            return history.dropLast(1).map { turn ->
-                when (turn.role) {
-                    ROLE_USER -> Message.user(turn.rawText)
-                    ROLE_ASSISTANT -> Message.model(turn.rawText)
-                    else -> throw IllegalArgumentException("Unexpected LiteRT turn role: ${turn.role}")
-                }
-            }
+            return nativeReplayHistory(history.dropLast(1))
         }
 
         internal fun shouldRecreateForCold(pristineConversation: Boolean): Boolean =

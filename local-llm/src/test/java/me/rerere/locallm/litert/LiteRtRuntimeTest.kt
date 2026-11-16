@@ -174,6 +174,86 @@ class LiteRtRuntimeTest {
         )
     }
 
+    // ---- Role-correct Cold replay ------------------------------------------------
+
+    @Test
+    fun `Cold user turn replays historical tool calls with MODEL and TOOL roles`() {
+        val prior = Turn(
+            ROLE_ASSISTANT,
+            "<tool_call>...</tool_call><tool_result>...</tool_result>现在是14点。",
+            listOf(
+                NativeReplayPart.Tool("get_time_info", "{}", "14:00"),
+                NativeReplayPart.Text("现在是14点。"),
+            ),
+        )
+        val restored = LiteRtRuntime.nativeInitialHistory(
+            listOf(Turn(ROLE_USER, "现在几点"), prior, Turn(ROLE_USER, "再查一次")),
+        )!!
+        assertEquals(4, restored.size)
+        assertEquals(com.google.ai.edge.litertlm.Role.USER, restored[0].role)
+        assertEquals(com.google.ai.edge.litertlm.Role.MODEL, restored[1].role)
+        assertEquals("get_time_info", restored[1].toolCalls.single().name)
+        assertEquals(com.google.ai.edge.litertlm.Role.TOOL, restored[2].role)
+        assertEquals(com.google.ai.edge.litertlm.Role.MODEL, restored[3].role)
+        assertEquals("现在是14点。", restored[3].toString())
+    }
+
+    @Test
+    fun `Cold tool continuation rebuilds tool response without User text fallback`() {
+        val pendingAssistant = Turn(
+            ROLE_ASSISTANT,
+            "<tool_call>...</tool_call><tool_result>...</tool_result>",
+            listOf(
+                NativeReplayPart.Tool(
+                    "search_web", """{"query":"android","limit":2}""", "official page",
+                ),
+            ),
+        )
+        val (initial, input) = nativeColdToolContinuation(
+            listOf(Turn(ROLE_USER, "查询 Android 版本"), pendingAssistant),
+        )!!
+        assertEquals(2, initial.size)
+        assertEquals(com.google.ai.edge.litertlm.Role.USER, initial[0].role)
+        assertEquals(com.google.ai.edge.litertlm.Role.MODEL, initial[1].role)
+        val call = initial[1].toolCalls.single()
+        assertEquals("search_web", call.name)
+        assertEquals("android", call.arguments["query"])
+        assertEquals(2L, call.arguments["limit"])
+        assertEquals(com.google.ai.edge.litertlm.Role.TOOL, input.role)
+        val tool = input.contents.contents.single() as com.google.ai.edge.litertlm.Content.ToolResponse
+        assertEquals("search_web", tool.name)
+        assertEquals("official page", tool.response)
+    }
+
+    @Test
+    fun `Cold tool continuation never parses model's literal tool tags as executable tools`() {
+        val raw = Turn(ROLE_ASSISTANT, "<tool_call>{\"name\":\"search_web\"}</tool_call>")
+        assertEquals(null, nativeColdToolContinuation(listOf(Turn(ROLE_USER, "查询"), raw)))
+    }
+
+    @Test
+    fun `Cold tool continuation rejects unfinished or missing tool output`() {
+        val incomplete = Turn(
+            ROLE_ASSISTANT,
+            "tool pending",
+            listOf(NativeReplayPart.Tool("search_web", "{}", null)),
+        )
+        assertEquals(null, nativeColdToolContinuation(listOf(Turn(ROLE_USER, "查询"), incomplete)))
+    }
+
+    @Test
+    fun `tool match diagnostics do not log user content`() {
+        val pending = PendingToolBatch(
+            listOf(Turn(ROLE_USER, "secret").signature),
+            listOf(RuntimeToolCall("call-1", "search_web", "{}")),
+        )
+        val history = listOf(Turn(ROLE_USER, "changed"), Turn(ROLE_ASSISTANT, "tool"))
+        assertEquals(
+            "history-prefix-changed-or-trimmed",
+            nativeToolMatchFailureReason(pending, history, emptyList()),
+        )
+    }
+
     // ---- Native TOOL response continuation ---------------------------------------
 
     private val searchCall = RuntimeToolCall(
