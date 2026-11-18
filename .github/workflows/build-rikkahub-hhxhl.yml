@@ -1,14 +1,19 @@
-name: Build RikkaHub (hhxhl)
+name: Build RikkaHub Hhxhl
 
 # Manual signed release build; upload APKs to Actions Artifacts only.
 on:
   workflow_dispatch:
     inputs:
       build_branch:
-        description: '要构建的源码分支'
+        description: 'Branch to build'
         required: true
         default: 'master-hhxhl'
         type: string
+      upload_name:
+        description: 'Artifact name'
+        required: false
+        default: 'rikkahub-hhxhl'
+
 
 permissions:
   contents: read
@@ -103,7 +108,7 @@ jobs:
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rikkahub-hhxhl-release-${{ github.run_number }}-${{ github.run_attempt }}
+          name: ${{ inputs.upload_name }}-${{ github.run_number }}-${{ github.run_attempt }}
           path: app/build/outputs/apk/github/release/*.apk
           if-no-files-found: error
           retention-days: 30
