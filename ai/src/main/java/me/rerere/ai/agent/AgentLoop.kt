@@ -64,7 +64,7 @@ internal class AgentLoop(
             }
             if (steps == request.maxSteps) return finish(AgentFinishReason.StepLimitReached)
             // 只在刚执行完工具时问：接着一条已经执行完的消息继续时不问，否则暂停之后再运行又会立刻暂停
-            if (toolsExecuted && hooks.shouldPause(checkNotNull(message))) return finish(AgentFinishReason.Paused)
+            if (toolsExecuted && !checkNotNull(message).hasTrailingRemoteApprovalDecision() && hooks.shouldPause(checkNotNull(message))) return finish(AgentFinishReason.Paused)
             generateStep()
             steps++
         }
@@ -110,6 +110,7 @@ internal class AgentLoop(
     // 续写普通回复时最后一个 part 不是执行完的工具或通知，这时追加会把续写变成新的一轮
     private suspend fun appendPendingParts() {
         val current = message
+        if (current?.hasTrailingRemoteApprovalDecision() == true) return
         if (current != null && !current.parts.lastOrNull().isModelsTurn()) return
         val parts = hooks.pendingParts()
         if (parts.isEmpty()) return
@@ -180,7 +181,8 @@ internal class AgentLoop(
         val tools = checkNotNull(message).getTools().filter { !it.isExecuted }
         for (tool in tools) {
             // 只给真正运行的工具计时；开始时先写一次，界面才能在执行中实时显示耗时
-            val runs = tool.approvalState == ToolApprovalState.Auto || tool.approvalState == ToolApprovalState.Approved
+            val runs = tool.remoteMcpApprovalRequest == null &&
+                (tool.approvalState == ToolApprovalState.Auto || tool.approvalState == ToolApprovalState.Approved)
             if (runs) updateTool(tool.toolCallId) { it.copy(startedAt = Clock.System.now(), finishedAt = null) }
             val output = execute(tool)
             updateTool(tool.toolCallId) {
@@ -257,6 +259,13 @@ internal class AgentLoop(
         events.emit(AgentEvent.Finished(checkNotNull(message), reason))
     }
 }
+
+// Deliver a decided remote approval before context compression or background notices
+// can split its trailing tool batch into a new user turn.
+private fun UIMessage.hasTrailingRemoteApprovalDecision() =
+    parts.asReversed().takeWhile { it is UIMessagePart.Tool }.any {
+        it is UIMessagePart.Tool && it.remoteMcpApprovalRequest != null && it.isExecuted
+    }
 
 private fun UIMessagePart?.isModelsTurn() =
     (this is UIMessagePart.Tool && isExecuted) || this is UIMessagePart.Notice
