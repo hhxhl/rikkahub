@@ -1945,7 +1945,7 @@
   <string name="setting_mcp_execution_client">Client execution</string>
   <string name="setting_mcp_execution_server">Server execution</string>
   <string name="setting_mcp_execution_client_desc">RikkaHub connects to the MCP server and executes tools.</string>
-  <string name="setting_mcp_execution_server_desc">The model API connects to the MCP server. Requires OpenAI Responses API.</string>
+  <string name="setting_mcp_execution_server_desc">The model API connects to the MCP server. Requires a compatible Responses API with remote MCP support. MCP credentials are sent to the selected API provider; use only trusted providers.</string>
   <string name="setting_mcp_execution_remote_tools">Tools are discovered and called by the model API during chat. Approval follows the configured policy.</string>
   <string name="setting_mcp_remote_approval_policy">Approval policy</string>
   <string name="setting_mcp_remote_read_only">Read only</string>

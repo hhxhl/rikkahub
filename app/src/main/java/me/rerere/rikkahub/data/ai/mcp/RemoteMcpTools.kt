@@ -18,10 +18,15 @@ internal fun remoteMcpTools(
             it.commonOptions.executionMode == McpExecutionMode.SERVER
     }
     if (enabled.isEmpty()) return emptyList()
-    // Only the official OpenAI API has been targeted in this first version.
-    require(provider is ProviderSetting.OpenAI && provider.useResponseApi &&
-        provider.baseUrl.toHttpUrlOrNull()?.let { it.isHttps && it.host == "api.openai.com" } == true) {
-        "Server MCP requires the official OpenAI Responses API. Use client execution for other providers."
+    // Any compatible Responses endpoint may execute remote MCP. The user must
+    // trust that provider with the MCP credentials and verify its protocol support.
+    require(provider is ProviderSetting.OpenAI && provider.useResponseApi) {
+        "Server MCP requires a compatible Responses API with remote MCP support."
+    }
+    require(provider.baseUrl.toHttpUrlOrNull()?.let {
+        it.isHttps && it.username.isEmpty() && it.password.isEmpty()
+    } == true) {
+        "Server MCP requires an HTTPS API endpoint without embedded credentials."
     }
     require(enabled.none { it.commonOptions.remoteApprovalPolicy != RemoteMcpApprovalPolicy.READ_ONLY } ||
         provider.apiKey.trim().let { it.isNotBlank() && !it.contains(Regex("[\\s,]")) }) {
@@ -51,7 +56,7 @@ internal fun remoteMcpTools(
         }
         // Bind an outstanding approval to its exact server, credential, model and policy.
         val binding = MessageDigest.getInstance("SHA-256").digest(
-            listOf(provider.id.toString(), provider.baseUrl, provider.apiKey, modelId,
+            listOf(provider.id.toString(), provider.baseUrl, provider.responsesPath, provider.apiKey, modelId,
                 server.id.toString(), server.commonOptions.name, url.toString(),
                 authorization.orEmpty(), headers.toSortedMap().toString(),
                 server.commonOptions.remoteApprovalPolicy.name).joinToString("\u0000").toByteArray()

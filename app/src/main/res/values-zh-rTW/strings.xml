@@ -1941,7 +1941,7 @@
   <string name="setting_mcp_execution_client">用戶端執行</string>
   <string name="setting_mcp_execution_server">伺服器端執行</string>
   <string name="setting_mcp_execution_client_desc">由 RikkaHub 連線至 MCP 伺服器並執行工具。</string>
-  <string name="setting_mcp_execution_server_desc">由模型 API 連線至 MCP 伺服器，需要 OpenAI Responses API。</string>
+  <string name="setting_mcp_execution_server_desc">由模型 API 連線至 MCP 伺服器，需要支援遠端 MCP 的相容 Responses API。MCP 認證資訊會傳送給所選 API 提供商，請僅使用可信提供商。</string>
   <string name="setting_mcp_execution_remote_tools">工具由模型 API 在對話時探索及呼叫，並依所選策略審批。</string>
   <string name="setting_mcp_remote_approval_policy">審批策略</string>
   <string name="setting_mcp_remote_read_only">僅允許讀取</string>

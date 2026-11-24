@@ -1947,7 +1947,7 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="setting_mcp_execution_client">客户端执行</string>
   <string name="setting_mcp_execution_server">服务端执行</string>
   <string name="setting_mcp_execution_client_desc">由 RikkaHub 连接 MCP 服务器并执行工具。</string>
-  <string name="setting_mcp_execution_server_desc">由模型 API 连接 MCP 服务器，需要 OpenAI Responses API。</string>
+  <string name="setting_mcp_execution_server_desc">由模型 API 连接 MCP 服务器，需要支持远程 MCP 的兼容 Responses API。MCP 认证信息会发送给所选 API 提供商，请仅使用可信提供商。</string>
   <string name="setting_mcp_execution_remote_tools">工具由模型 API 在对话时发现和调用，并按所选策略审批。</string>
   <string name="setting_mcp_remote_approval_policy">审批策略</string>
   <string name="setting_mcp_remote_read_only">仅允许读取</string>
