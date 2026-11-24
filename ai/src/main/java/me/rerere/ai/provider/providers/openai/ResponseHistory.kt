@@ -84,7 +84,7 @@ internal fun responseHistoryScope(provider: ProviderSetting.OpenAI, params: Text
     // Explicit custom state/input overrides belong to the caller.
     if (params.customBody.any { it.key in setOf("input", "store", "previous_response_id", "conversation", "model") }) return null
     return fingerprint(listOf(provider.id.toString(), provider.baseUrl, provider.responsesPath,
-        key, session, params.model.id.toString(), params.customHeaders.toString()).joinToString("\u0000"))
+        key, session, params.model.id.toString(), provider.customHeaders.toString(), params.customHeaders.toString()).joinToString("\u0000"))
 }
 
 private fun fingerprint(value: String): String =

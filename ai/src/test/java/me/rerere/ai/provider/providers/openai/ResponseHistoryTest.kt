@@ -5,6 +5,10 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import me.rerere.ai.util.json
+import okhttp3.OkHttpClient
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -54,5 +58,37 @@ class ResponseHistoryTest {
         assertTrue(isPreviousResponseMissing(404, """{"error":{"param":"previous_response_id","message":"Response not found"}}"""))
         assertFalse(isPreviousResponseMissing(401, """{"error":{"code":"previous_response_not_found"}}"""))
         assertFalse(isPreviousResponseMissing(404, """{"error":{"message":"Model not found"}}"""))
+    }
+
+    @Test fun pendingParallelCallsAreIncludedButTheirResultsAreNot() {
+        val api = ResponseAPI(OkHttpClient())
+        val response = json.parseToJsonElement("""
+            {"id":"resp_1","status":"completed","output":[
+              {"type":"message","content":[{"type":"output_text","text":"Searching"}]},
+              {"type":"function_call","call_id":"call_a","name":"search","arguments":"{}"},
+              {"type":"function_call","call_id":"call_b","name":"search","arguments":"{}"}
+            ]}
+        """).jsonObject
+        val items = requireNotNull(api.historyOutput(response))
+        assertEquals(3, items.size)
+        assertEquals(listOf("call_a", "call_b"), items.drop(1).map {
+            it.jsonObject.getValue("call_id").jsonPrimitive.content
+        })
+        val history = ResponseHistory()
+        val a = item("user", "search")
+        history.remember(history.prepare("session", body(a)), "resp_1", items)
+        val resultA = buildJsonObject {
+            put("type", "function_call_output")
+            put("call_id", "call_a")
+            put("output", "a")
+        }
+        val resultB = buildJsonObject {
+            put("type", "function_call_output")
+            put("call_id", "call_b")
+            put("output", "b")
+        }
+        val next = history.prepare("session", body(a, *items.map { it.jsonObject }.toTypedArray(), resultA, resultB))
+        assertTrue(next.continued)
+        assertEquals(JsonArray(listOf(resultA, resultB)), next.body["input"])
     }
 }

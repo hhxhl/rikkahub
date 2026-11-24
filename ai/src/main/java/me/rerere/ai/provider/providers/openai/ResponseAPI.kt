@@ -181,25 +181,41 @@ class ResponseAPI(
         runCatching {
             val id = response["id"]?.jsonPrimitive?.contentOrNull ?: return
             if (response["status"]?.jsonPrimitive?.contentOrNull != "completed") return
-            val output = response["output"]?.jsonArray ?: return
-            if (output.isEmpty() || output.any { item ->
-                    val obj = item.jsonObject
-                    val type = obj["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                    type !in setOf("message", "reasoning", "function_call") &&
-                        !isOpenAIServerToolCall(type)
-                }) return
-            val message = parseResponseOutput(response).message
-            val pending = message.parts.filterIsInstance<UIMessagePart.Tool>()
-                .filterNot { it.isExecuted }.map { it.toolCallId }.toSet()
-            // The local serializer emits empty output for pending calls; those results
-            // have not yet been sent to the server and must not be part of the prefix.
-            val prefix = buildMessages(listOf(message)).filterNot { item ->
-                val obj = item.jsonObject
-                obj["type"]?.jsonPrimitive?.contentOrNull == "function_call_output" &&
-                    obj["call_id"]?.jsonPrimitive?.contentOrNull in pending
-            }
-            if (prefix.isNotEmpty()) responseHistory.remember(attempt, id, prefix)
+            val prefix = historyOutput(response) ?: return
+            responseHistory.remember(attempt, id, prefix)
         }
+    }
+
+    internal fun historyOutput(response: JsonObject): List<kotlinx.serialization.json.JsonElement>? {
+        val output = response["output"]?.jsonArray ?: return null
+        if (output.isEmpty() || output.any { item ->
+                val obj = item.jsonObject
+                val type = obj["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                type !in setOf("message", "reasoning", "function_call") &&
+                    !isOpenAIServerToolCall(type)
+            }) return null
+        val message = parseResponseOutput(response).message
+        val pending = message.parts.filterIsInstance<UIMessagePart.Tool>()
+            .filterNot { it.isExecuted }.map { it.toolCallId }.toSet()
+        // The normal history serializer skips unexecuted tools. Mark them as
+        // executed only in this temporary copy to serialize their call items,
+        // then remove the synthetic results (the server has not received them).
+        val normalized = message.copy(parts = message.parts.map { part ->
+            if (part is UIMessagePart.Tool && part.toolCallId in pending) {
+                part.copy(output = listOf(UIMessagePart.Text("")))
+            } else part
+        })
+        val prefix = buildMessages(listOf(normalized)).filterNot { item ->
+            val obj = item.jsonObject
+            obj["type"]?.jsonPrimitive?.contentOrNull == "function_call_output" &&
+                obj["call_id"]?.jsonPrimitive?.contentOrNull in pending
+        }
+        // Never commit a checkpoint that omitted a call.
+        val serializedCalls = prefix.map { it.jsonObject }.filter {
+            it["type"]?.jsonPrimitive?.contentOrNull == "function_call"
+        }.mapNotNull { it["call_id"]?.jsonPrimitive?.contentOrNull }.toSet()
+        if (!serializedCalls.containsAll(pending)) return null
+        return prefix.takeIf { it.isNotEmpty() }
     }
 
     private fun streamRequest(
