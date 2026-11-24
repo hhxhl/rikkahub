@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="litert_benchmark_title">LiteRT Benchmark</string>
+    <string name="litert_benchmark_tip">Native benchmark() test; unloads the current local Engine while running. Chat requests will wait. GPU may be unstable on some devices.</string>
+    <string name="litert_benchmark_prefill">Prefill tokens</string>
+    <string name="litert_benchmark_decode">Decode tokens</string>
+    <string name="litert_benchmark_runs">Runs (1–10)</string>
+    <string name="litert_benchmark_progress">Run %1$d / %2$d</string>
+    <string name="litert_benchmark_error">Error: %1$s</string>
+    <string name="litert_benchmark_results">Results (native measurements)</string>
+    <string name="litert_benchmark_avg">Avg: prefill %1$s tok/s, decode %2$s tok/s, TTFT %3$s s</string>
+    <string name="litert_benchmark_init">Init: first %1$s ms; subsequent avg %2$s ms</string>
+    <string name="litert_benchmark_one_run">Run %1$d: prefill %2$s, decode %3$s tok/s; TTFT %4$s s</string>
+    <string name="litert_benchmark_export">Export CSV</string>
+    <string name="litert_benchmark_exported">CSV saved</string>
+    <string name="litert_benchmark_start">Run</string>
+</resources>

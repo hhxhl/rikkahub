@@ -46,6 +46,7 @@ val ProviderSetting.supportsBuiltInSearch: Boolean
         is ProviderSetting.Google -> true
         is ProviderSetting.Claude -> true
         is ProviderSetting.Account -> true
+        is ProviderSetting.LiteRtLocal -> false
     }
 
 @Serializable
@@ -220,6 +221,40 @@ sealed class ProviderSetting {
     }
 
     /** 用 API Key 鉴权、地址可以自填的提供商 */
+    /** On-device LiteRT-LM. Shares the normal Provider abstraction; no HTTP credentials. */
+    @Serializable
+    @SerialName("local_litert")
+    data class LiteRtLocal(
+        override val id: Uuid = Uuid.random(),
+        override val enabled: Boolean = true,
+        override val name: String = "Local · LiteRT",
+        override val models: List<Model> = emptyList(),
+        override val customHeaders: List<CustomHeader> = emptyList(),
+        @Transient override val builtIn: Boolean = false,
+        @Transient override val description: @Composable (() -> Unit) = {},
+        @Transient override val shortDescription: @Composable (() -> Unit) = {},
+    ) : ProviderSetting() {
+        override fun copyProvider(
+            id: Uuid,
+            enabled: Boolean,
+            name: String,
+            models: List<Model>,
+            customHeaders: List<CustomHeader>,
+            builtIn: Boolean,
+            description: @Composable (() -> Unit),
+            shortDescription: @Composable (() -> Unit),
+        ): ProviderSetting = copy(
+            id = id,
+            enabled = enabled,
+            name = name,
+            models = models,
+            customHeaders = customHeaders,
+            builtIn = builtIn,
+            description = description,
+            shortDescription = shortDescription,
+        )
+    }
+
     @Serializable
     sealed class ApiKey : ProviderSetting() {
         abstract val apiKey: String

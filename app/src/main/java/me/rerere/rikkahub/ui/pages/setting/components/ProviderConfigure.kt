@@ -107,7 +107,15 @@ fun ProviderConfigure(
             switchItem(
                 checked = provider.enabled,
                 onCheckedChange = { onEdit(provider.copyProvider(enabled = it)) },
-                headlineContent = { Text(stringResource(R.string.setting_provider_page_enable)) },
+                headlineContent = {
+                    Text(
+                        if (provider is ProviderSetting.LiteRtLocal) "是否启用"
+                        else stringResource(R.string.setting_provider_page_enable)
+                    )
+                },
+                supportingContent = if (provider is ProviderSetting.LiteRtLocal) {
+                    { Text("启用后可在对话中使用本地模型") }
+                } else null,
             )
         }
 
@@ -115,6 +123,7 @@ fun ProviderConfigure(
             is ProviderSetting.OpenAI -> ProviderConfigureOpenAI(provider, onEdit)
             is ProviderSetting.Google -> ProviderConfigureGoogle(provider, onEdit)
             is ProviderSetting.Claude -> ProviderConfigureClaude(provider, onEdit)
+            is ProviderSetting.LiteRtLocal -> ProviderConfigureLiteRT(provider, onEdit)
             is ProviderSetting.ChatGPT -> ProviderConfigureAccount(
                 provider = provider,
                 onEdit = onEdit,

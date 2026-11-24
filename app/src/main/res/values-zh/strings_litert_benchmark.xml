@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="litert_benchmark_title">LiteRT 性能基准测试</string>
+    <string name="litert_benchmark_tip">使用原生 benchmark() 测试；期间会卸载现有本地 Engine，聊天请求需等待。部分设备的 GPU 测试可能不稳定。</string>
+    <string name="litert_benchmark_prefill">Prefill Token 数</string>
+    <string name="litert_benchmark_decode">Decode Token 数</string>
+    <string name="litert_benchmark_runs">运行次数 (1–10)</string>
+    <string name="litert_benchmark_progress">第 %1$d / %2$d 次</string>
+    <string name="litert_benchmark_error">错误：%1$s</string>
+    <string name="litert_benchmark_results">测试结果（原生测量）</string>
+    <string name="litert_benchmark_avg">平均：Prefill %1$s Token/s，Decode %2$s Token/s，TTFT %3$s 秒</string>
+    <string name="litert_benchmark_init">初始化：首次 %1$s ms，后续平均 %2$s ms</string>
+    <string name="litert_benchmark_one_run">第 %1$d 次：Prefill %2$s、Decode %3$s Token/s；TTFT %4$s 秒</string>
+    <string name="litert_benchmark_export">导出 CSV</string>
+    <string name="litert_benchmark_exported">CSV 已保存</string>
+    <string name="litert_benchmark_start">开始测试</string>
+</resources>

@@ -68,7 +68,12 @@ fun createSearchTools(settings: Settings): Set<Tool> {
                         params = it.jsonObject,
                         commonOptions = settings.searchCommonOptions,
                         serviceOptions = options,
-                    ).getOrThrow().copy(retrievedAt = Clock.System.now().toString())
+                    ).getOrThrow().let { raw ->
+                        raw.copy(
+                            items = raw.items.take(settings.searchCommonOptions.resultSize.coerceAtLeast(1)),
+                            retrievedAt = Clock.System.now().toString()
+                        )
+                    }
                     val results =
                         JsonInstantPretty.encodeToJsonElement(result).jsonObject.let { json ->
                             val map = json.toMutableMap()

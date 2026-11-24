@@ -126,6 +126,7 @@ fun ChatPage(
         }
     )
     val filesManager: FilesManager = koinInject()
+    val liteRtPreloader: me.rerere.locallm.litert.LiteRtPreloader = koinInject()
     val navController = LocalNavController.current
     val scope = rememberCoroutineScope()
 
@@ -177,6 +178,20 @@ fun ChatPage(
 
     val startVoiceMode = rememberVoiceModeStarter(vm, setting)
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    // Only the selected local model is preloaded. No conversation or KV cache is created.
+    // The preloader owns its background scope so recomposition/navigation cannot cancel a
+    // native Engine.initialize() halfway through; Provider.streamText remains the fallback.
+    val selectedLocalModelId = currentChatModel?.takeIf {
+        it.findProvider(setting.providers) is ProviderSetting.LiteRtLocal
+    }?.modelId
+    LaunchedEffect(selectedLocalModelId, setting.init, lifecycleState) {
+        // Leaving the chat screen (for example to inspect LiteRT settings) must not
+        // cancel an in-flight Engine preload. Only a real model selection change
+        // while this page is resumed should update the preloader's selection.
+        if (!setting.init && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)) {
+            liteRtPreloader.onModelSelected(selectedLocalModelId)
+        }
+    }
     LaunchedEffect(assistantVoiceRequested, setting.init, currentChatModel, lifecycleState) {
         // A warm assistant launch may arrive while the previous chat Activity is still
         // stopped/paused. Keep the one-shot request until this page is resumed so
