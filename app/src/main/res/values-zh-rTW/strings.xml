@@ -1941,6 +1941,13 @@
   <string name="setting_mcp_execution_client">用戶端執行</string>
   <string name="setting_mcp_execution_server">伺服器端執行</string>
   <string name="setting_mcp_execution_client_desc">由 RikkaHub 連線至 MCP 伺服器並執行工具。</string>
-  <string name="setting_mcp_execution_server_desc">由模型 API 連線至 MCP 伺服器。目前支援 OpenAI Responses API 的唯讀工具，請使用唯讀權杖。</string>
-  <string name="setting_mcp_execution_remote_tools">工具由模型 API 在對話時探索及呼叫，目前僅支援唯讀工具。</string>
+  <string name="setting_mcp_execution_server_desc">由模型 API 連線至 MCP 伺服器，需要 OpenAI Responses API。</string>
+  <string name="setting_mcp_execution_remote_tools">工具由模型 API 在對話時探索及呼叫，並依所選策略審批。</string>
+  <string name="setting_mcp_remote_approval_policy">審批策略</string>
+  <string name="setting_mcp_remote_read_only">僅允許讀取</string>
+  <string name="setting_mcp_remote_write_approval">寫入需要審批</string>
+  <string name="setting_mcp_remote_no_approval">無需審批</string>
+  <string name="setting_mcp_remote_read_only_desc">僅允許標記為唯讀的工具，請使用唯讀權杖。</string>
+  <string name="setting_mcp_remote_write_approval_desc">唯讀工具自動執行，其他工具必須經過你的明確審批。</string>
+  <string name="setting_mcp_remote_no_approval_desc">允許在權杖權限範圍內自動執行工具，包括寫入操作。僅用於可信伺服器。</string>
 </resources>

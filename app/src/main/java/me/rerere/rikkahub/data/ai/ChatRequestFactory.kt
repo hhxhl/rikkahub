@@ -23,6 +23,7 @@ import me.rerere.rikkahub.data.ai.mcp.remoteMcpTools
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.limitContext
+import me.rerere.ai.ui.remoteMcpApprovalRequest
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.prompts.buildMemoryPrompt
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
@@ -283,9 +284,12 @@ class ChatRequestFactory(
                 addAll(turn.model.customBodies)
             },
             sessionId = turn.conversationId.toString(),
-            remoteMcpTools = remoteMcpTools(turn.settings.mcpServers, assistant.mcpServers, turn.providerSetting),
+            remoteMcpTools = remoteMcpTools(turn.settings.mcpServers, assistant.mcpServers, turn.providerSetting, turn.model.modelId),
         )
-        return StepRequest(requestMessages, params)
+        val supportsRemote = (turn.providerSetting as? ProviderSetting.OpenAI)?.useResponseApi == true
+        return StepRequest(if (supportsRemote) requestMessages else requestMessages.map { message ->
+            message.copy(parts = message.parts.filterNot { it is UIMessagePart.Tool && it.remoteMcpApprovalRequest != null })
+        }, params)
     }
 }
 

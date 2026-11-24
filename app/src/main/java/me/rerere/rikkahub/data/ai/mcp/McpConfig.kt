@@ -3,6 +3,7 @@ package me.rerere.rikkahub.data.ai.mcp
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import me.rerere.ai.core.InputSchema
+import me.rerere.ai.provider.RemoteMcpApprovalPolicy
 import kotlin.uuid.Uuid
 
 @Serializable
@@ -18,6 +19,7 @@ data class McpCommonOptions(
     val tools: List<McpTool> = emptyList(),
     val oauth: McpOAuthState? = null,
     val executionMode: McpExecutionMode = McpExecutionMode.CLIENT,
+    val remoteApprovalPolicy: RemoteMcpApprovalPolicy = RemoteMcpApprovalPolicy.READ_ONLY,
 )
 
 /**

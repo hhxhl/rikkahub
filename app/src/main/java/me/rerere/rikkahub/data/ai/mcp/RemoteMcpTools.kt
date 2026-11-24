@@ -4,11 +4,14 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.RemoteMcpTool
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlin.uuid.Uuid
+import java.security.MessageDigest
+import me.rerere.ai.provider.RemoteMcpApprovalPolicy
 
 internal fun remoteMcpTools(
     servers: List<McpServerConfig>,
     selected: Set<Uuid>,
     provider: ProviderSetting,
+    modelId: String,
 ): List<RemoteMcpTool> {
     val enabled = servers.filter {
         it.id in selected && it.commonOptions.enable &&
@@ -30,7 +33,7 @@ internal fun remoteMcpTools(
             "Server MCP requires an HTTPS server URL without embedded credentials."
         }
         require(server.commonOptions.oauth?.enabled != true) {
-            "Server MCP OAuth is not supported yet. Configure a read-only token in request headers."
+            "Server MCP OAuth is not supported yet. Configure a token in request headers."
         }
         val headers = linkedMapOf<String, String>()
         var authorization: String? = null
@@ -42,6 +45,14 @@ internal fun remoteMcpTools(
                 headers[name] = value
             }
         }
-        RemoteMcpTool(server.commonOptions.name, url.toString(), authorization, headers)
+        // Bind an outstanding approval to its exact server, credential, model and policy.
+        val binding = MessageDigest.getInstance("SHA-256").digest(
+            listOf(provider.id.toString(), provider.baseUrl, provider.apiKey, modelId,
+                server.id.toString(), server.commonOptions.name, url.toString(),
+                authorization.orEmpty(), headers.toSortedMap().toString(),
+                server.commonOptions.remoteApprovalPolicy.name).joinToString("\u0000").toByteArray()
+        ).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        RemoteMcpTool(server.commonOptions.name, url.toString(), authorization, headers,
+            server.commonOptions.remoteApprovalPolicy, binding)
     }
 }

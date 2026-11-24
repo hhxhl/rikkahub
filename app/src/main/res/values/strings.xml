@@ -1945,6 +1945,13 @@
   <string name="setting_mcp_execution_client">Client execution</string>
   <string name="setting_mcp_execution_server">Server execution</string>
   <string name="setting_mcp_execution_client_desc">RikkaHub connects to the MCP server and executes tools.</string>
-  <string name="setting_mcp_execution_server_desc">The model API connects to the MCP server. This version supports read-only tools with OpenAI Responses API; use read-only credentials.</string>
-  <string name="setting_mcp_execution_remote_tools">Tools are discovered and called by the model API during chat. This version supports read-only tools only.</string>
+  <string name="setting_mcp_execution_server_desc">The model API connects to the MCP server. Requires OpenAI Responses API.</string>
+  <string name="setting_mcp_execution_remote_tools">Tools are discovered and called by the model API during chat. Approval follows the configured policy.</string>
+  <string name="setting_mcp_remote_approval_policy">Approval policy</string>
+  <string name="setting_mcp_remote_read_only">Read only</string>
+  <string name="setting_mcp_remote_write_approval">Approve writes</string>
+  <string name="setting_mcp_remote_no_approval">No approval</string>
+  <string name="setting_mcp_remote_read_only_desc">Only allow tools annotated read-only. Use a read-only token.</string>
+  <string name="setting_mcp_remote_write_approval_desc">Read-only tools run automatically. Other tools require your explicit approval.</string>
+  <string name="setting_mcp_remote_no_approval_desc">All permitted tools can execute without confirmation, including writes. Only use with trusted servers.</string>
 </resources>

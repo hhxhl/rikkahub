@@ -1947,6 +1947,13 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="setting_mcp_execution_client">客户端执行</string>
   <string name="setting_mcp_execution_server">服务端执行</string>
   <string name="setting_mcp_execution_client_desc">由 RikkaHub 连接 MCP 服务器并执行工具。</string>
-  <string name="setting_mcp_execution_server_desc">由模型 API 连接 MCP 服务器。目前支持 OpenAI Responses API 的只读工具，请使用只读令牌。</string>
-  <string name="setting_mcp_execution_remote_tools">工具由模型 API 在对话时发现和调用，目前仅支持只读工具。</string>
+  <string name="setting_mcp_execution_server_desc">由模型 API 连接 MCP 服务器，需要 OpenAI Responses API。</string>
+  <string name="setting_mcp_execution_remote_tools">工具由模型 API 在对话时发现和调用，并按所选策略审批。</string>
+  <string name="setting_mcp_remote_approval_policy">审批策略</string>
+  <string name="setting_mcp_remote_read_only">仅允许读取</string>
+  <string name="setting_mcp_remote_write_approval">写入需要审批</string>
+  <string name="setting_mcp_remote_no_approval">无需审批</string>
+  <string name="setting_mcp_remote_read_only_desc">仅允许标记为只读的工具，请使用只读令牌。</string>
+  <string name="setting_mcp_remote_write_approval_desc">只读工具自动执行，其他工具必须经过你的明确审批。</string>
+  <string name="setting_mcp_remote_no_approval_desc">允许在令牌权限范围内自动执行工具，包括写入操作。仅用于可信服务器。</string>
 </resources>

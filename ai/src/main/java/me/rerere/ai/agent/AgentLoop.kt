@@ -9,6 +9,9 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.sum
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.RemoteMcpApprovalPolicy
+import me.rerere.ai.ui.remoteMcpApprovalRequest
 import me.rerere.ai.ui.StreamChunkHandler
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
@@ -73,7 +76,7 @@ internal class AgentLoop(
             parts = current.parts.map { part ->
                 if (part is UIMessagePart.Tool && !part.isExecuted &&
                     part.approvalState == ToolApprovalState.Auto &&
-                    findTool(part.toolName)?.needsApproval?.invoke(part.inputAsJson()) == true
+                    (part.remoteMcpApprovalRequest != null || findTool(part.toolName)?.needsApproval?.invoke(part.inputAsJson()) == true)
                 ) {
                     part.copy(approvalState = ToolApprovalState.Pending)
                 } else {
@@ -123,7 +126,7 @@ internal class AgentLoop(
         // 本步从清空的统计开始（merge 只适合同一次请求内的快照），再与之前的步骤累加。
         val stepStart = base.copy(usage = null, generationTimeMs = null)
         return try {
-            withRetry(request.retry, onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
+            withRetry(retryFor(params), onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
                 // 每次重试都从本步开始时的消息重新合并，不会把重试的响应接在已经展示的半截回复后面；
                 // 各次尝试共用同一个消息 id，调用方直接覆盖即可。
                 val handler = StreamChunkHandler(params.model)
@@ -155,7 +158,7 @@ internal class AgentLoop(
     ): UIMessage {
         // 非流式拿不到首 token 时间，只能统计最后一次尝试的整个请求耗时
         var requestMark = TimeSource.Monotonic.markNow()
-        val result = withRetry(request.retry, onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
+        val result = withRetry(retryFor(params), onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
             requestMark = TimeSource.Monotonic.markNow()
             request.provider.generateText(request.providerSetting, messages, params)
         }
@@ -197,8 +200,24 @@ internal class AgentLoop(
         )
     }
 
-    private suspend fun execute(tool: UIMessagePart.Tool): List<UIMessagePart> =
-        when (val state = tool.approvalState) {
+    private fun retryFor(params: TextGenerationParams): RetryPolicy =
+        if (params.remoteMcpTools.any { it.approvalPolicy != RemoteMcpApprovalPolicy.READ_ONLY }) RetryPolicy.NONE
+        else request.retry
+
+    private suspend fun execute(tool: UIMessagePart.Tool): List<UIMessagePart> {
+        if (tool.remoteMcpApprovalRequest != null) {
+            require((request.providerSetting as? ProviderSetting.OpenAI)?.useResponseApi == true) {
+                "Remote MCP approval must be resumed with its original Responses API provider."
+            }
+            // This is a decision, not a phone-side invocation. The next Responses
+            // request contains the approval response and the server performs the tool.
+            return when (tool.approvalState) {
+                ToolApprovalState.Approved -> listOf(UIMessagePart.Text("Approved; execution is delegated to the server."))
+                is ToolApprovalState.Denied -> listOf(UIMessagePart.Text("Denied by user."))
+                else -> error("Remote MCP call requires an explicit approval or denial")
+            }
+        }
+        return when (val state = tool.approvalState) {
             is ToolApprovalState.Denied -> errorOutput(
                 "Tool execution denied by user. Reason: ${state.reason.ifBlank { "No reason provided" }}"
             )
@@ -207,6 +226,8 @@ internal class AgentLoop(
             ToolApprovalState.Auto, ToolApprovalState.Approved -> runTool(tool)
             ToolApprovalState.Pending -> error("Tool ${tool.toolCallId} is still waiting for approval")
         }
+
+    }
 
     private suspend fun runTool(tool: UIMessagePart.Tool): List<UIMessagePart> = try {
         val definition = findTool(tool.toolName) ?: error("Tool ${tool.toolName} not found")

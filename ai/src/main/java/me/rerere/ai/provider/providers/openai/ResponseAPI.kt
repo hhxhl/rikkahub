@@ -50,6 +50,9 @@ import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.metadataAs
+import me.rerere.ai.ui.remoteMcpApprovalRequest
+import me.rerere.ai.ui.remoteMcpApprovalBinding
+import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
@@ -149,7 +152,7 @@ class ResponseAPI(
             responseHistory.invalidate(attempt)
             send(attempt.fullBody)
         }
-        val parsed = parseResponseOutput(result)
+        val parsed = parseResponseOutput(result, params.remoteMcpTools.associate { it.label to it.approvalBinding })
         rememberHistory(attempt, result)
         parsed
     }
@@ -163,7 +166,7 @@ class ResponseAPI(
         val attempt = responseHistory.prepare(endpoint.historyScope, fullBody)
         var emitted = false
         try {
-            streamRequest(endpoint, attempt.body) { rememberHistory(attempt, it) }.collect {
+            streamRequest(endpoint, attempt.body, params.remoteMcpTools.associate { it.label to it.approvalBinding }) { rememberHistory(attempt, it) }.collect {
                 emitted = true
                 emit(it)
             }
@@ -171,7 +174,7 @@ class ResponseAPI(
             // Never replay after output/tool events have already been delivered.
             if (!attempt.continued || emitted) throw e
             responseHistory.invalidate(attempt)
-            streamRequest(endpoint, attempt.fullBody) { rememberHistory(attempt, it) }.collect { emit(it) }
+            streamRequest(endpoint, attempt.fullBody, params.remoteMcpTools.associate { it.label to it.approvalBinding }) { rememberHistory(attempt, it) }.collect { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
 
@@ -221,6 +224,7 @@ class ResponseAPI(
     private fun streamRequest(
         endpoint: ResponsesEndpoint,
         requestBody: JsonObject,
+        approvalBindings: Map<String, String>,
         onCompleted: (JsonObject) -> Unit,
     ): Flow<StreamChunk> = callbackFlow {
         val request = Request.Builder()
@@ -230,7 +234,7 @@ class ResponseAPI(
             .build()
 
 
-        val decoder = ResponseApiStreamDecoder()
+        val decoder = ResponseApiStreamDecoder(approvalBindings)
 
         fun sendChunks(chunks: Iterable<StreamChunk>) {
             chunks.forEach { chunk ->
@@ -304,6 +308,7 @@ class ResponseAPI(
         params: TextGenerationParams,
         stream: Boolean
     ): JsonObject {
+        validateRemoteMcpApprovals(messages, params.remoteMcpTools)
         return buildJsonObject {
             put("model", params.model.modelId)
             put("stream", stream)
@@ -415,14 +420,14 @@ class ResponseAPI(
             }
             .forEach { message ->
                 if (message.role == MessageRole.ASSISTANT) {
-                    addAssistantItems(message)
+                    addAssistantItems(message, message === messages.lastOrNull())
                 } else {
                     addUserItems(message)
                 }
             }
     }
 
-    private fun JsonArrayBuilder.addAssistantItems(message: UIMessage) {
+    private fun JsonArrayBuilder.addAssistantItems(message: UIMessage, active: Boolean) {
         val groups = groupPartsByToolBoundary(message.parts)
         val contentBuffer = mutableListOf<UIMessagePart>()
 
@@ -517,8 +522,16 @@ class ResponseAPI(
                         contentBuffer.clear()
                     }
 
+                    val remote = group.tools.filter { it.remoteMcpApprovalRequest != null }
+                    val local = group.tools.filter { it.remoteMcpApprovalRequest == null }
+                    // Only retain resolved historical approval pairs or the active approval batch.
+                    val completedApprovals = message.parts.filterIsInstance<UIMessagePart.ServerTool>()
+                        .mapNotNull { it.metadataAs<ServerToolMetadata>()?.call?.get("approval_request_id")?.jsonPrimitive?.contentOrNull }.toSet()
+                    val approvals = remote.filter { it.toolCallId in completedApprovals ||
+                        (active && group === groups.lastOrNull()) }
+                    approvals.forEach { add(checkNotNull(it.remoteMcpApprovalRequest)) }
                     // 同一批并发工具调用需先输出全部 function_call，再输出对应结果。
-                    group.tools.forEach { tool ->
+                    local.forEach { tool ->
                         add(buildJsonObject {
                             put("type", "function_call")
                             put("call_id", tool.toolCallId)
@@ -527,7 +540,8 @@ class ResponseAPI(
                             put("arguments", tool.inputAsJson().toString())
                         })
                     }
-                    group.tools.forEach { tool ->
+                    approvals.forEach { add(it.toRemoteMcpApprovalResponse()) }
+                    local.forEach { tool ->
                         add(buildJsonObject {
                             put("type", "function_call_output")
                             put("call_id", tool.toolCallId)
@@ -646,7 +660,7 @@ class ResponseAPI(
         })
     }
 
-    internal fun parseResponseOutput(jsonObject: JsonObject): TextGenerationResult {
+    internal fun parseResponseOutput(jsonObject: JsonObject, approvalBindings: Map<String, String> = emptyMap()): TextGenerationResult {
         val outputs = jsonObject["output"]?.jsonArray ?: error("output not found")
         val parts = arrayListOf<UIMessagePart>()
 
@@ -702,6 +716,8 @@ class ResponseAPI(
                         )
                     }
                 }
+
+                "mcp_approval_request" -> parts.add(output.toRemoteMcpApprovalTool(approvalBindings))
 
                 "function_call" -> {
                     val callId = output["call_id"]?.jsonPrimitive?.content ?: error("call_id not found")

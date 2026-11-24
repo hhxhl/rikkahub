@@ -20,7 +20,8 @@ import me.rerere.ai.util.json
 import me.rerere.ai.util.parseErrorDetail
 import me.rerere.common.http.jsonObjectOrNull
 
-internal class ResponseApiStreamDecoder : StreamChunkDecoder {
+internal class ResponseApiStreamDecoder(private val approvalBindings: Map<String, String> = emptyMap()) : StreamChunkDecoder {
+    private val emittedApprovals = mutableSetOf<String>()
     private val state = ResponseStreamState()
 
     override fun accept(event: SseEvent): DecodeResult {
@@ -133,6 +134,7 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
                         }
                         addAll(state.endImage(id))
                     }
+                    "mcp_approval_request" -> approvalChunks(item)
                     "function_call" -> state.endTool(state.toolCallIdsByItemId.remove(id) ?: id)
                     "function_call_output" -> functionCallOutput(item)
                     else -> if (isOpenAIServerToolCall(type)) {
@@ -200,6 +202,16 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
     private fun JsonObject.itemIdOrCallId(): String? =
         this["id"]?.jsonPrimitive?.contentOrNull ?: this["call_id"]?.jsonPrimitive?.contentOrNull
 
+    private fun approvalChunks(item: JsonObject): List<StreamChunk> {
+        val tool = item.toRemoteMcpApprovalTool(approvalBindings)
+        if (!emittedApprovals.add(tool.toolCallId)) return emptyList()
+        return listOf(
+            StreamChunk.ToolCallStart(tool.toolCallId, tool.toolName, tool.metadata),
+            StreamChunk.ToolCallDelta(tool.toolCallId, inputDelta = tool.input),
+            StreamChunk.ToolCallEnd(tool.toolCallId),
+        )
+    }
+
     private fun parseTerminalResponse(payload: JsonObject): List<StreamChunk> {
         val response = payload["response"]?.jsonObject
         val status = response?.get("status")?.jsonPrimitive?.contentOrNull
@@ -213,6 +225,10 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
         }
 
         return buildList {
+            (response?.get("output") as? kotlinx.serialization.json.JsonArray).orEmpty().forEach { item ->
+                val obj = item.jsonObject
+                if (obj["type"]?.jsonPrimitive?.contentOrNull == "mcp_approval_request") addAll(approvalChunks(obj))
+            }
             parseUsage(response?.get("usage") as? JsonObject)?.let { add(StreamChunk.Usage(it)) }
             addAll(state.finish(
                 finishReason = finishReason,

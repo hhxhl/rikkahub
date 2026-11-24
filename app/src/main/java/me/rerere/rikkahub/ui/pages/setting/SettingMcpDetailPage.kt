@@ -65,6 +65,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.rerere.ai.core.InputSchema
+import me.rerere.ai.provider.RemoteMcpApprovalPolicy
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.ArrowDown01
@@ -131,6 +132,7 @@ fun SettingMcpDetailPage(id: Uuid, vm: SettingVM = koinViewModel()) {
                                 name = draft.commonOptions.name,
                                 headers = draft.commonOptions.headers,
                                 executionMode = draft.commonOptions.executionMode,
+                                remoteApprovalPolicy = draft.commonOptions.remoteApprovalPolicy,
                             )
                         )
                     } else {
@@ -531,6 +533,34 @@ private fun McpCommonOptionsConfigure(
         }
 
         HorizontalDivider()
+
+        if (config.commonOptions.executionMode == McpExecutionMode.SERVER) {
+            FormItem(
+                label = { Text(stringResource(R.string.setting_mcp_remote_approval_policy)) },
+                description = { Text(stringResource(when (config.commonOptions.remoteApprovalPolicy) {
+                    RemoteMcpApprovalPolicy.READ_ONLY -> R.string.setting_mcp_remote_read_only_desc
+                    RemoteMcpApprovalPolicy.WRITE_APPROVAL -> R.string.setting_mcp_remote_write_approval_desc
+                    RemoteMcpApprovalPolicy.NO_APPROVAL -> R.string.setting_mcp_remote_no_approval_desc
+                })) },
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    RemoteMcpApprovalPolicy.entries.forEach { policy ->
+                        androidx.compose.material3.FilterChip(
+                            selected = config.commonOptions.remoteApprovalPolicy == policy,
+                            onClick = {
+                                update(config.clone(commonOptions = config.commonOptions.copy(remoteApprovalPolicy = policy)))
+                            },
+                            label = { Text(stringResource(when (policy) {
+                                RemoteMcpApprovalPolicy.READ_ONLY -> R.string.setting_mcp_remote_read_only
+                                RemoteMcpApprovalPolicy.WRITE_APPROVAL -> R.string.setting_mcp_remote_write_approval
+                                RemoteMcpApprovalPolicy.NO_APPROVAL -> R.string.setting_mcp_remote_no_approval
+                            })) },
+                        )
+                    }
+                }
+            }
+            HorizontalDivider()
+        }
 
         // 请求头配置
         FormItem(
