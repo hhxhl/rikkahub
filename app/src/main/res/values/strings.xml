@@ -1939,4 +1939,6 @@
   <string name="quick_start_card_desc">RikkaHub needs a model provider to chat. Follow the quick start to set up a provider and default model, or migrate your chat history from DeepSeek.</string>
   <string name="setting_page_quick_start">Quick Start</string>
   <string name="setting_page_quick_start_desc">Set up providers and models step by step, or migrate from DeepSeek</string>
+  <string name="setting_provider_page_server_history">Server-managed history</string>
+  <string name="setting_provider_page_server_history_desc">Store responses on the API server to send only new context when possible. Requires a compatible Responses API and a single API key. Local chat history is retained.</string>
 </resources>

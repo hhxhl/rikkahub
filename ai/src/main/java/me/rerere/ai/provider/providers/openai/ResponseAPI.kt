@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -85,12 +86,15 @@ internal class ResponsesEndpoint(
     val capabilities: ResponseProviderCapabilities = ResponseProviderCapabilities(),
     // 构建请求时调用，负责请求头和鉴权；可挂起，以便先刷新 token
     val configureRequest: suspend Request.Builder.() -> Unit,
+    val historyScope: String? = null,
 )
 
 class ResponseAPI(
     private val client: OkHttpClient,
     private val keyRoulette: KeyRoulette = KeyRoulette.default()
 ) : OpenAIImpl {
+    private val responseHistory = ResponseHistory()
+
     override suspend fun generateText(
         providerSetting: ProviderSetting.OpenAI,
         messages: List<UIMessage>,
@@ -106,6 +110,7 @@ class ResponseAPI(
     private fun ProviderSetting.OpenAI.toResponsesEndpoint(params: TextGenerationParams) = ResponsesEndpoint(
         url = "$baseUrl$responsesPath",
         capabilities = resolveResponseProviderCapabilities(baseUrl.toHttpUrl().host),
+        historyScope = responseHistoryScope(this, params),
         configureRequest = {
             headers(mergeCustomHeaders(params.customHeaders))
             addHeader("Authorization", "Bearer ${keyRoulette.next(apiKey, id.toString())}")
@@ -119,43 +124,89 @@ class ResponseAPI(
         messages: List<UIMessage>,
         params: TextGenerationParams
     ): TextGenerationResult = withContext(Dispatchers.IO) {
-        val requestBody = buildRequestBody(
-            capabilities = endpoint.capabilities,
-            messages = messages,
-            params = params,
-            stream = false,
-        )
-        val request = Request.Builder()
-            .url(endpoint.url)
-            .apply { endpoint.configureRequest(this) }
-            .post(json.encodeToString(requestBody).toRequestBody("application/json".toMediaType()))
-            .addHeader("Content-Type", "application/json")
-            .build()
-
-
-        // await() waits for the response headers; reading the body can still block.
-        client.newCall(request).await().use { response ->
-            if (!response.isSuccessful) {
-                throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+        val fullBody = buildRequestBody(endpoint.capabilities, messages, params, stream = false)
+        val attempt = responseHistory.prepare(endpoint.historyScope, fullBody)
+        suspend fun send(body: JsonObject): JsonObject {
+            val request = Request.Builder()
+                .url(endpoint.url)
+                .apply { endpoint.configureRequest(this) }
+                .post(json.encodeToString(body).toRequestBody("application/json".toMediaType()))
+                .addHeader("Content-Type", "application/json")
+                .build()
+            return client.newCall(request).await().use { response ->
+                val raw = response.body.string()
+                if (!response.isSuccessful) {
+                    if (isPreviousResponseMissing(response.code, raw)) throw PreviousResponseMissing()
+                    throw Exception("Failed to get response: ${response.code} $raw")
+                }
+                json.parseToJsonElement(raw).jsonObject
             }
-
-            val bodyStr = response.body.string()
-            val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
-            parseResponseOutput(bodyJson)
         }
+        val result = try {
+            send(attempt.body)
+        } catch (e: PreviousResponseMissing) {
+            if (!attempt.continued) throw e
+            responseHistory.invalidate(attempt)
+            send(attempt.fullBody)
+        }
+        val parsed = parseResponseOutput(result)
+        rememberHistory(attempt, result)
+        parsed
     }
 
     internal fun streamText(
         endpoint: ResponsesEndpoint,
         messages: List<UIMessage>,
         params: TextGenerationParams
+    ): Flow<StreamChunk> = flow {
+        val fullBody = buildRequestBody(endpoint.capabilities, messages, params, stream = true)
+        val attempt = responseHistory.prepare(endpoint.historyScope, fullBody)
+        var emitted = false
+        try {
+            streamRequest(endpoint, attempt.body) { rememberHistory(attempt, it) }.collect {
+                emitted = true
+                emit(it)
+            }
+        } catch (e: PreviousResponseMissing) {
+            // Never replay after output/tool events have already been delivered.
+            if (!attempt.continued || emitted) throw e
+            responseHistory.invalidate(attempt)
+            streamRequest(endpoint, attempt.fullBody) { rememberHistory(attempt, it) }.collect { emit(it) }
+        }
+    }.flowOn(Dispatchers.IO)
+
+    private fun rememberHistory(attempt: ResponseHistory.Attempt, response: JsonObject) {
+        if (attempt.scope == null) return
+        // A failure to normalize optional state must not fail an otherwise successful reply.
+        runCatching {
+            val id = response["id"]?.jsonPrimitive?.contentOrNull ?: return
+            if (response["status"]?.jsonPrimitive?.contentOrNull != "completed") return
+            val output = response["output"]?.jsonArray ?: return
+            if (output.isEmpty() || output.any { item ->
+                    val obj = item.jsonObject
+                    val type = obj["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    type !in setOf("message", "reasoning", "function_call") &&
+                        !isOpenAIServerToolCall(type)
+                }) return
+            val message = parseResponseOutput(response).message
+            val pending = message.parts.filterIsInstance<UIMessagePart.Tool>()
+                .filterNot { it.isExecuted }.map { it.toolCallId }.toSet()
+            // The local serializer emits empty output for pending calls; those results
+            // have not yet been sent to the server and must not be part of the prefix.
+            val prefix = buildMessages(listOf(message)).filterNot { item ->
+                val obj = item.jsonObject
+                obj["type"]?.jsonPrimitive?.contentOrNull == "function_call_output" &&
+                    obj["call_id"]?.jsonPrimitive?.contentOrNull in pending
+            }
+            if (prefix.isNotEmpty()) responseHistory.remember(attempt, id, prefix)
+        }
+    }
+
+    private fun streamRequest(
+        endpoint: ResponsesEndpoint,
+        requestBody: JsonObject,
+        onCompleted: (JsonObject) -> Unit,
     ): Flow<StreamChunk> = callbackFlow {
-        val requestBody = buildRequestBody(
-            capabilities = endpoint.capabilities,
-            messages = messages,
-            params = params,
-            stream = true,
-        )
         val request = Request.Builder()
             .url(endpoint.url)
             .apply { endpoint.configureRequest(this) }
@@ -182,6 +233,12 @@ class ResponseAPI(
             ) {
                 try {
                     val result = decoder.accept(SseEvent(id = id, event = type, data = data))
+                    if (result.completed && data != "[DONE]") {
+                        val payload = json.parseToJsonElement(data).jsonObject
+                        if (payload["type"]?.jsonPrimitive?.contentOrNull == "response.completed") {
+                            payload["response"]?.jsonObjectOrNull?.let(onCompleted)
+                        }
+                    }
                     sendChunks(result.chunks)
                     if (result.completed) close()
                 } catch (e: Throwable) {
@@ -195,6 +252,10 @@ class ResponseAPI(
 
 
                 val bodyRaw = response?.body?.stringSafe()
+                if (isPreviousResponseMissing(response?.code, bodyRaw)) {
+                    close(PreviousResponseMissing())
+                    return
+                }
                 try {
                     if (!bodyRaw.isNullOrBlank()) {
                         val bodyElement = Json.parseToJsonElement(bodyRaw)

@@ -360,6 +360,14 @@ private fun ProviderConfigureOpenAI(
             },
             headlineContent = { Text(stringResource(R.string.setting_provider_page_response_api)) },
         )
+        if (provider.useResponseApi) {
+            switchItem(
+                checked = provider.serverManagedHistory,
+                onCheckedChange = { onEdit(provider.copy(serverManagedHistory = it)) },
+                headlineContent = { Text(stringResource(R.string.setting_provider_page_server_history)) },
+                supportingContent = { Text(stringResource(R.string.setting_provider_page_server_history_desc)) },
+            )
+        }
         switchItem(
             checked = provider.includeHistoryReasoning,
             onCheckedChange = { onEdit(provider.copy(includeHistoryReasoning = it)) },
