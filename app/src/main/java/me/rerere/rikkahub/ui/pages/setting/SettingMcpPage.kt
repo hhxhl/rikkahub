@@ -70,6 +70,7 @@ import me.rerere.hugeicons.stroke.MessageBlocked
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.ai.mcp.McpCommonOptions
+import me.rerere.rikkahub.data.ai.mcp.McpExecutionMode
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
 import me.rerere.rikkahub.data.ai.mcp.McpStatus
@@ -263,7 +264,9 @@ private fun McpServerItem(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            when (status) {
+            if (item.commonOptions.executionMode == McpExecutionMode.SERVER) {
+                Icon(HugeIcons.McpServer, null)
+            } else when (status) {
                 McpStatus.Idle -> Icon(HugeIcons.MessageBlocked, null)
                 McpStatus.Connecting -> CircularProgressIndicator(
                     modifier = Modifier.size(
@@ -310,6 +313,9 @@ private fun McpServerItem(
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    if (item.commonOptions.executionMode == McpExecutionMode.SERVER) {
+                        Tag(type = TagType.INFO) { Text(stringResource(R.string.setting_mcp_execution_server)) }
+                    }
                     Tag(type = TagType.SUCCESS) {
                         when (item) {
                             is McpServerConfig.SseTransportServer -> Text("SSE")

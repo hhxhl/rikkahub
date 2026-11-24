@@ -22,6 +22,9 @@ class RequestLoggingInterceptor : Interceptor {
             body.writeTo(buffer)
             buffer.readUtf8()
         }
+        // MCP credentials are nested in the request JSON. Do not log the body or exception text.
+        val remoteMcp = requestBody?.contains(Regex("\"type\"\\s*:\\s*\"mcp\"")) == true
+        val safeRequestBody = if (remoteMcp) "[Remote MCP request body omitted]" else requestBody
 
         val response: Response
         var error: String? = null
@@ -29,14 +32,14 @@ class RequestLoggingInterceptor : Interceptor {
         try {
             response = chain.proceed(request)
         } catch (e: Exception) {
-            error = e.message
+            error = if (remoteMcp) e.javaClass.simpleName else e.message
             Logging.logRequest(
                 LogEntry.RequestLog(
                     tag = "HTTP",
                     url = request.url.toRedactedLogUrl(),
                     method = request.method,
                     requestHeaders = requestHeaders,
-                    requestBody = requestBody,
+                    requestBody = safeRequestBody,
                     error = error
                 )
             )
@@ -52,7 +55,7 @@ class RequestLoggingInterceptor : Interceptor {
                 url = request.url.toRedactedLogUrl(),
                 method = request.method,
                 requestHeaders = requestHeaders,
-                requestBody = requestBody,
+                requestBody = safeRequestBody,
                 responseCode = response.code,
                 responseHeaders = responseHeaders,
                 durationMs = durationMs,

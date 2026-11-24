@@ -6,12 +6,18 @@ import me.rerere.ai.core.InputSchema
 import kotlin.uuid.Uuid
 
 @Serializable
+enum class McpExecutionMode {
+    CLIENT, SERVER,
+}
+
+@Serializable
 data class McpCommonOptions(
     val enable: Boolean = true,
     val name: String = "",
     val headers: List<Pair<String, String>> = emptyList(),
     val tools: List<McpTool> = emptyList(),
     val oauth: McpOAuthState? = null,
+    val executionMode: McpExecutionMode = McpExecutionMode.CLIENT,
 )
 
 /**

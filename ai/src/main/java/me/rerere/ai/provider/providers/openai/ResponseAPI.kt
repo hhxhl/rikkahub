@@ -400,7 +400,7 @@ class ResponseAPI(
                     }
                 }
             }
-        }.mergeCustomBody(params.customBody)
+        }.mergeCustomBody(params.customBody).withRemoteMcpTools(params.remoteMcpTools)
     }
 
     internal fun buildMessages(messages: List<UIMessage>) = buildJsonArray {
@@ -790,26 +790,30 @@ internal fun JsonObject.functionCallOutputText(): String = when (val output = ge
 }
 
 internal fun isOpenAIServerToolCall(type: String): Boolean =
-    type.endsWith("_call") && type !in setOf(
+    type == "mcp_list_tools" || (type.endsWith("_call") && type !in setOf(
         "function_call",
         "custom_tool_call",
         "computer_call",
         "local_shell_call",
         "shell_call",
         "image_generation_call",
-    )
+    ))
 
 internal fun JsonObject.toOpenAIServerTool(): UIMessagePart.ServerTool {
     val type = get("type")?.jsonPrimitive?.contentOrNull ?: "server_tool_call"
-    val protocolFields = setOf("type", "id", "status", "result", "output")
+    val protocolFields = setOf("type", "id", "status", "result", "output", "error", "tools")
     val input = get("action") ?: JsonObject(filterKeys { it !in protocolFields })
         .takeUnless { it.isEmpty() }
     return UIMessagePart.ServerTool(
         toolCallId = get("id")?.jsonPrimitive?.contentOrNull ?: "",
         toolName = type.removeSuffix("_call"),
         input = input,
-        output = get("output") ?: get("result"),
-        status = get("status")?.jsonPrimitive?.contentOrNull.toServerToolStatus(),
+        output = get("output") ?: get("result") ?: get("tools") ?: get("error"),
+        status = when {
+            get("error")?.let { it != JsonNull } == true -> ServerToolStatus.FAILED
+            type == "mcp_list_tools" && get("tools") is JsonArray -> ServerToolStatus.COMPLETED
+            else -> get("status")?.jsonPrimitive?.contentOrNull.toServerToolStatus()
+        },
         metadata = ServerToolMetadata(
             protocol = ServerToolProtocol.OPENAI_RESPONSES,
             call = this,

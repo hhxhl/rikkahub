@@ -76,6 +76,7 @@ import me.rerere.hugeicons.stroke.Tools
 import me.rerere.hugeicons.stroke.View
 import me.rerere.hugeicons.stroke.ViewOff
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.ai.mcp.McpExecutionMode
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
 import me.rerere.rikkahub.data.ai.mcp.McpTool
@@ -129,6 +130,7 @@ fun SettingMcpDetailPage(id: Uuid, vm: SettingVM = koinViewModel()) {
                                 enable = draft.commonOptions.enable,
                                 name = draft.commonOptions.name,
                                 headers = draft.commonOptions.headers,
+                                executionMode = draft.commonOptions.executionMode,
                             )
                         )
                     } else {
@@ -508,6 +510,28 @@ private fun McpCommonOptionsConfigure(
 
         HorizontalDivider()
 
+        FormItem(
+            label = { Text(stringResource(R.string.setting_mcp_execution_mode)) },
+            description = {
+                Text(stringResource(if (config.commonOptions.executionMode == McpExecutionMode.SERVER)
+                    R.string.setting_mcp_execution_server_desc else R.string.setting_mcp_execution_client_desc))
+            },
+        ) {
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                McpExecutionMode.entries.forEachIndexed { index, mode ->
+                    SegmentedButton(
+                        shape = SegmentedButtonDefaults.itemShape(index, McpExecutionMode.entries.size),
+                        selected = config.commonOptions.executionMode == mode,
+                        onClick = { update(config.clone(commonOptions = config.commonOptions.copy(executionMode = mode))) },
+                    ) {
+                        Text(stringResource(if (mode == McpExecutionMode.CLIENT) R.string.setting_mcp_execution_client else R.string.setting_mcp_execution_server))
+                    }
+                }
+            }
+        }
+
+        HorizontalDivider()
+
         // 请求头配置
         FormItem(
             label = {
@@ -646,6 +670,12 @@ private fun McpToolsConfigure(
     config: McpServerConfig,
     onToolChange: (McpTool) -> Unit,
 ) {
+    if (config.commonOptions.executionMode == McpExecutionMode.SERVER) {
+        Box(modifier = Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+            Text(stringResource(R.string.setting_mcp_execution_remote_tools))
+        }
+        return
+    }
     val mcpManager = koinInject<McpManager>()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),

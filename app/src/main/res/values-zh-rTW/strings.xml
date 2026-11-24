@@ -1937,4 +1937,10 @@
   <string name="quick_start_page_deepseek_import_another">匯入另一個 ZIP</string>
   <string name="setting_provider_page_server_history">伺服器管理對話歷史</string>
   <string name="setting_provider_page_server_history_desc">在 API 伺服器儲存回應，盡可能只傳送新增上下文。需要相容的 Responses API 和單一 API 金鑰。本機聊天記錄仍然保留。</string>
+  <string name="setting_mcp_execution_mode">執行方式</string>
+  <string name="setting_mcp_execution_client">用戶端執行</string>
+  <string name="setting_mcp_execution_server">伺服器端執行</string>
+  <string name="setting_mcp_execution_client_desc">由 RikkaHub 連線至 MCP 伺服器並執行工具。</string>
+  <string name="setting_mcp_execution_server_desc">由模型 API 連線至 MCP 伺服器。目前支援 OpenAI Responses API 的唯讀工具，請使用唯讀權杖。</string>
+  <string name="setting_mcp_execution_remote_tools">工具由模型 API 在對話時探索及呼叫，目前僅支援唯讀工具。</string>
 </resources>

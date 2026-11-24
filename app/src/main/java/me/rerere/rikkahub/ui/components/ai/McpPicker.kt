@@ -48,6 +48,7 @@ import me.rerere.hugeicons.stroke.ArrowLeft01
 import me.rerere.hugeicons.stroke.Icon1stBracket
 import me.rerere.hugeicons.stroke.McpServer
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.ai.mcp.McpExecutionMode
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
 import me.rerere.rikkahub.data.ai.mcp.McpStatus
@@ -288,7 +289,9 @@ fun McpPicker(
                 shapes = ListItemDefaults.segmentedShapes(index = index, count = enabledServers.size),
                 colors = colors,
                 leadingContent = {
-                    when (status) {
+                    if (server.commonOptions.executionMode == McpExecutionMode.SERVER) {
+                        Icon(HugeIcons.McpServer, null)
+                    } else when (status) {
                         McpStatus.Idle -> Icon(HugeIcons.Icon1stBracket, null)
                         McpStatus.Connected -> Icon(HugeIcons.McpServer, null)
                         McpStatus.Connecting,
@@ -307,7 +310,9 @@ fun McpPicker(
                 // 触发 Compose UI 1.12 的 "LayoutNode not found in RectList" 崩溃 (#2179)，所以只放单个 Text
                 supportingContent = {
                     Text(
-                        text = when (val s = status) {
+                        text = if (server.commonOptions.executionMode == McpExecutionMode.SERVER) {
+                            stringResource(R.string.setting_mcp_execution_server)
+                        } else when (val s = status) {
                             is McpStatus.Idle -> "Idle"
                             is McpStatus.Connecting -> "Connecting"
                             is McpStatus.Connected -> "Connected"

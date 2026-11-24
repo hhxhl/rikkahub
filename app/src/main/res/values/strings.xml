@@ -1941,4 +1941,10 @@
   <string name="setting_page_quick_start_desc">Set up providers and models step by step, or migrate from DeepSeek</string>
   <string name="setting_provider_page_server_history">Server-managed history</string>
   <string name="setting_provider_page_server_history_desc">Store responses on the API server to send only new context when possible. Requires a compatible Responses API and a single API key. Local chat history is retained.</string>
+  <string name="setting_mcp_execution_mode">Execution mode</string>
+  <string name="setting_mcp_execution_client">Client execution</string>
+  <string name="setting_mcp_execution_server">Server execution</string>
+  <string name="setting_mcp_execution_client_desc">RikkaHub connects to the MCP server and executes tools.</string>
+  <string name="setting_mcp_execution_server_desc">The model API connects to the MCP server. This version supports read-only tools with OpenAI Responses API; use read-only credentials.</string>
+  <string name="setting_mcp_execution_remote_tools">Tools are discovered and called by the model API during chat. This version supports read-only tools only.</string>
 </resources>

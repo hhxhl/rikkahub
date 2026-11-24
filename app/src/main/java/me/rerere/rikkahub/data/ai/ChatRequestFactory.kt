@@ -19,6 +19,7 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.rikkahub.data.ai.mcp.remoteMcpTools
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.limitContext
@@ -282,6 +283,7 @@ class ChatRequestFactory(
                 addAll(turn.model.customBodies)
             },
             sessionId = turn.conversationId.toString(),
+            remoteMcpTools = remoteMcpTools(turn.settings.mcpServers, assistant.mcpServers, turn.providerSetting),
         )
         return StepRequest(requestMessages, params)
     }
