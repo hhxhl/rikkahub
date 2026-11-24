@@ -35,6 +35,7 @@ import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.RemoteMcpApprovalPolicy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.TextGenerationResult
 import me.rerere.ai.provider.providers.PartGroup
@@ -97,6 +98,10 @@ class ResponseAPI(
     private val keyRoulette: KeyRoulette = KeyRoulette.default()
 ) : OpenAIImpl {
     private val responseHistory = ResponseHistory()
+    private val noRetryClient by lazy { client.newBuilder().retryOnConnectionFailure(false).build() }
+
+    private fun requestClient(params: TextGenerationParams): OkHttpClient =
+        if (params.remoteMcpTools.any { it.approvalPolicy != RemoteMcpApprovalPolicy.READ_ONLY }) noRetryClient else client
 
     override suspend fun generateText(
         providerSetting: ProviderSetting.OpenAI,
@@ -136,7 +141,7 @@ class ResponseAPI(
                 .post(json.encodeToString(body).toRequestBody("application/json".toMediaType()))
                 .addHeader("Content-Type", "application/json")
                 .build()
-            return client.newCall(request).await().use { response ->
+            return requestClient(params).newCall(request).await().use { response ->
                 val raw = response.body.string()
                 if (!response.isSuccessful) {
                     if (isPreviousResponseMissing(response.code, raw)) throw PreviousResponseMissing()
@@ -166,7 +171,7 @@ class ResponseAPI(
         val attempt = responseHistory.prepare(endpoint.historyScope, fullBody)
         var emitted = false
         try {
-            streamRequest(endpoint, attempt.body, params.remoteMcpTools.associate { it.label to it.approvalBinding }) { rememberHistory(attempt, it) }.collect {
+            streamRequest(endpoint, attempt.body, requestClient(params), params.remoteMcpTools.associate { it.label to it.approvalBinding }) { rememberHistory(attempt, it) }.collect {
                 emitted = true
                 emit(it)
             }
@@ -174,7 +179,7 @@ class ResponseAPI(
             // Never replay after output/tool events have already been delivered.
             if (!attempt.continued || emitted) throw e
             responseHistory.invalidate(attempt)
-            streamRequest(endpoint, attempt.fullBody, params.remoteMcpTools.associate { it.label to it.approvalBinding }) { rememberHistory(attempt, it) }.collect { emit(it) }
+            streamRequest(endpoint, attempt.fullBody, requestClient(params), params.remoteMcpTools.associate { it.label to it.approvalBinding }) { rememberHistory(attempt, it) }.collect { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
 
@@ -224,6 +229,7 @@ class ResponseAPI(
     private fun streamRequest(
         endpoint: ResponsesEndpoint,
         requestBody: JsonObject,
+        requestClient: OkHttpClient,
         approvalBindings: Map<String, String>,
         onCompleted: (JsonObject) -> Unit,
     ): Flow<StreamChunk> = callbackFlow {
@@ -294,7 +300,7 @@ class ResponseAPI(
             }
         }
 
-        val eventSource = client.newEventSource(request, listener)
+        val eventSource = requestClient.newEventSource(request, listener)
 
         awaitClose {
             eventSource.cancel()

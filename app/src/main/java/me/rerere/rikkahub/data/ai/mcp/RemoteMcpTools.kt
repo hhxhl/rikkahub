@@ -23,6 +23,10 @@ internal fun remoteMcpTools(
         provider.baseUrl.toHttpUrlOrNull()?.let { it.isHttps && it.host == "api.openai.com" } == true) {
         "Server MCP requires the official OpenAI Responses API. Use client execution for other providers."
     }
+    require(enabled.none { it.commonOptions.remoteApprovalPolicy != RemoteMcpApprovalPolicy.READ_ONLY } ||
+        provider.apiKey.trim().let { it.isNotBlank() && !it.contains(Regex("[\\s,]")) }) {
+        "Remote MCP writes require a single API key."
+    }
     val names = enabled.map { it.commonOptions.name }
     require(names.all { it.matches(Regex("[A-Za-z0-9_-]{1,64}")) } && names.distinct().size == names.size) {
         "Server MCP requires unique labels (letters, digits, underscores or hyphens)."

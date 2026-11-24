@@ -59,6 +59,9 @@ internal fun validateRemoteMcpApprovals(messages: List<UIMessage>, servers: List
     for (tool in last.parts.filterIsInstance<UIMessagePart.Tool>()) {
         val raw = tool.remoteMcpApprovalRequest ?: continue
         if (tool.toolCallId in completed || !tool.isExecuted) continue
+        require(raw.getValue("arguments").jsonPrimitive.content == tool.input) {
+            "Remote MCP approval arguments changed. Request approval again."
+        }
         val label = raw.getValue("server_label").jsonPrimitive.content
         val expected = servers.firstOrNull { it.label == label }?.approvalBinding
         require(!expected.isNullOrBlank() && expected == tool.remoteMcpApprovalBinding) {

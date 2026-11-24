@@ -6,6 +6,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.serialization.json.JsonPrimitive
+import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.agent.AgentHooks
 import me.rerere.ai.agent.AgentRequest
 import me.rerere.ai.agent.RetryPolicy
@@ -217,7 +219,13 @@ class ChatRequestFactory(
                 providerSetting = turn.providerSetting,
                 messages = requestMessages + UIMessage.user(compressPrompt),
                 // 助手的输出上限是给聊天回复定的，结构化摘要写不完会被截断；max_tokens 不属于请求前缀，改了不影响缓存
-                params = params.copy(maxTokens = null),
+                params = params.copy(
+                    maxTokens = null,
+                    // An automatic summary must never initiate an MCP write, including
+                    // on a server configured to execute without approval.
+                    customBody = if (params.remoteMcpTools.isEmpty()) params.customBody else
+                        params.customBody + CustomBody("tool_choice", JsonPrimitive("none")),
+                ),
             )
         }
         val summary = result.message.compressionSummaryOrNull()
