@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -43,95 +41,90 @@ import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
-import me.rerere.hugeicons.HugeIcons
-import me.rerere.hugeicons.stroke.Connect
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
 import me.rerere.rikkahub.ui.theme.extendColors
 import me.rerere.rikkahub.utils.UiState
 import org.koin.compose.koinInject
 
+// 只有 dialog 本身，开关由调用方持有：入口按钮所在的悬浮工具栏会在键盘弹出时移出 composition，
+// 如果 dialog 挂在按钮下面，点模型搜索框弹出键盘就会把 dialog 连同 sheet 一起销毁
 @Composable
-fun ProviderConnectionTester(
+fun ProviderConnectionTestDialog(
     internalProvider: ProviderSetting,
+    onDismissRequest: () -> Unit,
 ) {
-    var showTestDialog by remember { mutableStateOf(false) }
-    var liteRtTestRunning by remember { mutableStateOf(false) }
     val providerManager = koinInject<ProviderManager>()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    IconButton(onClick = { showTestDialog = true }) {
-        Icon(HugeIcons.Connect, null)
+    var model by remember(internalProvider) {
+        mutableStateOf(internalProvider.models.firstOrNull { it.type == ModelType.CHAT })
+    }
+    var nonStreamingState: UiState<String> by remember { mutableStateOf(UiState.Idle) }
+    var streamingState: UiState<String> by remember { mutableStateOf(UiState.Idle) }
+    var toolsState: UiState<String> by remember { mutableStateOf(UiState.Idle) }
+    var streamingText by remember { mutableStateOf("") }
+    var liteRtTestRunning by remember { mutableStateOf(false) }
+
+    fun resetStates() {
+        nonStreamingState = UiState.Idle
+        streamingState = UiState.Idle
+        toolsState = UiState.Idle
+        streamingText = ""
     }
 
-    if (showTestDialog) {
-        var model by remember(internalProvider) {
-            mutableStateOf(internalProvider.models.firstOrNull { it.type == ModelType.CHAT })
-        }
-        var nonStreamingState: UiState<String> by remember { mutableStateOf(UiState.Idle) }
-        var streamingState: UiState<String> by remember { mutableStateOf(UiState.Idle) }
-        var toolsState: UiState<String> by remember { mutableStateOf(UiState.Idle) }
-        var streamingText by remember { mutableStateOf("") }
-
-        fun resetStates() {
-            nonStreamingState = UiState.Idle
-            streamingState = UiState.Idle
-            toolsState = UiState.Idle
-            streamingText = ""
-        }
-
-        AlertDialog(
-            onDismissRequest = { showTestDialog = false },
-            title = {
-                Text(stringResource(R.string.setting_provider_page_test_connection))
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ModelSelector(
-                        modelId = model?.id,
-                        providers = listOf(internalProvider),
-                        type = ModelType.CHAT,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        model = it
-                    }
-
-                    TestResultItem(
-                        label = stringResource(R.string.setting_provider_page_test_non_streaming),
-                        state = nonStreamingState,
-                        resultText = (nonStreamingState as? UiState.Success)?.data ?: ""
-                    )
-
-                    TestResultItem(
-                        label = stringResource(R.string.setting_provider_page_test_streaming),
-                        state = streamingState,
-                        resultText = streamingText
-                    )
-
-                    TestResultItem(
-                        label = stringResource(R.string.setting_provider_page_test_tool_call),
-                        state = toolsState,
-                        resultText = (toolsState as? UiState.Success)?.data ?: ""
-                    )
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        title = {
+            Text(stringResource(R.string.setting_provider_page_test_connection))
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ModelSelector(
+                    modelId = model?.id,
+                    providers = listOf(internalProvider),
+                    type = ModelType.CHAT,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    model = it
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { showTestDialog = false }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (model == null) return@TextButton
-                        // Only serialize LiteRT tests. Cloud providers still run all three concurrently.
-                        val isLiteRt = internalProvider is ProviderSetting.LiteRtLocal
-                        if (isLiteRt && liteRtTestRunning) return@TextButton
-                        val provider = providerManager.getProviderByType(internalProvider)
-                        if (isLiteRt) liteRtTestRunning = true
-                        resetStates()
-                        scope.launch {
+
+                TestResultItem(
+                    label = stringResource(R.string.setting_provider_page_test_non_streaming),
+                    state = nonStreamingState,
+                    resultText = (nonStreamingState as? UiState.Success)?.data ?: ""
+                )
+
+                TestResultItem(
+                    label = stringResource(R.string.setting_provider_page_test_streaming),
+                    state = streamingState,
+                    resultText = streamingText
+                )
+
+                TestResultItem(
+                    label = stringResource(R.string.setting_provider_page_test_tool_call),
+                    state = toolsState,
+                    resultText = (toolsState as? UiState.Success)?.data ?: ""
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismissRequest) {
+                Text(stringResource(R.string.cancel))
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (model == null) return@TextButton
+                    val provider = providerManager.getProviderByType(internalProvider)
+                    val isLiteRt = internalProvider is ProviderSetting.LiteRtLocal
+                    if (isLiteRt && liteRtTestRunning) return@TextButton
+                    resetStates()
+                    if (isLiteRt) liteRtTestRunning = true
+                    scope.launch {
+                        try {
                             val nonStreamingJob = launch {
                                 runCatching {
                                     nonStreamingState = UiState.Loading
@@ -224,19 +217,18 @@ fun ProviderConnectionTester(
                                     toolsState = UiState.Success(resultText)
                                 }.onFailure { toolsState = UiState.Error(it) }
                             }
-                            if (isLiteRt) {
-                                toolsJob.join()
-                                liteRtTestRunning = false
-                            }
+                            if (isLiteRt) toolsJob.join()
+                        } finally {
+                            if (isLiteRt) liteRtTestRunning = false
                         }
-                    },
-                    enabled = internalProvider !is ProviderSetting.LiteRtLocal || !liteRtTestRunning,
-                ) {
-                    Text(stringResource(R.string.setting_provider_page_test))
-                }
+                    }
+                },
+                enabled = internalProvider !is ProviderSetting.LiteRtLocal || !liteRtTestRunning,
+            ) {
+                Text(stringResource(R.string.setting_provider_page_test))
             }
-        )
-    }
+        }
+    )
 }
 
 @Composable
