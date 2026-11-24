@@ -561,6 +561,12 @@ private fun CardGroupScope.androidSystemASRItems(
             singleLine = true,
         )
     }
+    switchItem(
+        checked = setting.preferOffline,
+        onCheckedChange = { onValueChange(setting.copy(preferOffline = it)) },
+        headlineContent = { Text(stringResource(R.string.setting_asr_configure_prefer_offline)) },
+        supportingContent = { Text(stringResource(R.string.setting_asr_configure_prefer_offline_desc)) },
+    )
 }
 
 private fun CardGroupScope.deepSeekASRItems(

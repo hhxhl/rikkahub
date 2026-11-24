@@ -11,17 +11,19 @@ class ASRProviderSettingAndroidSystemTest {
         val setting = ASRProviderSetting.AndroidSystem()
         assertEquals("Android System ASR", setting.name)
         assertEquals("zh-CN", setting.language)
+        assertTrue(setting.preferOffline)
         assertTrue(setting.supportsServerVadVoiceMode)
         assertTrue(ASRProviderSetting.Types.contains(ASRProviderSetting.AndroidSystem::class))
     }
 
     @Test
     fun android_system_copy_provider_keeps_language() {
-        val setting = ASRProviderSetting.AndroidSystem(language = "en-US")
+        val setting = ASRProviderSetting.AndroidSystem(language = "en-US", preferOffline = false)
         val renamed = setting.copyProvider(id = setting.id, name = "Local ASR")
         assertTrue(renamed is ASRProviderSetting.AndroidSystem)
         assertEquals("Local ASR", renamed.name)
         assertEquals("en-US", (renamed as ASRProviderSetting.AndroidSystem).language)
+        assertFalse(renamed.preferOffline)
     }
 
     @Test

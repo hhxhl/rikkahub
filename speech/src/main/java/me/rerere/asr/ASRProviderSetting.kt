@@ -184,6 +184,7 @@ sealed class ASRProviderSetting {
         override val id: Uuid = Uuid.random(),
         override val name: String = "Android System ASR",
         val language: String = "zh-CN",
+        val preferOffline: Boolean = true,
     ) : ASRProviderSetting() {
         override fun copyProvider(id: Uuid, name: String): ASRProviderSetting =
             copy(id = id, name = name)

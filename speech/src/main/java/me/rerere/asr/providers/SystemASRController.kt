@@ -167,7 +167,7 @@ class SystemASRController(
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, provider.language)
             }
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, provider.preferOffline)
         }
 
         // Defer binder start until the previous onResults/onError callback has unwound.
