@@ -34,6 +34,8 @@ data class LiteRtModelConfig(
 )
 
 object LiteRtModelDefaults {
+    internal fun isCuratedModel(modelFile: String): Boolean = BUILT_IN.any { it.modelFile == modelFile }
+
     /**
      * Look up by exact `modelFile` name. An unknown file (installed from a pasted URL) gets
      * conservative defaults rather than the SDK's silent internal ones, with its context

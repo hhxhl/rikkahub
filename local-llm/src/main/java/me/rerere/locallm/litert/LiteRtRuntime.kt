@@ -32,6 +32,8 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.trySendBlocking
+import me.rerere.ai.ui.UIMessagePart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withTimeoutOrNull
@@ -88,8 +90,14 @@ data class Turn(
     val role: String,
     val rawText: String,
     val nativeParts: List<NativeReplayPart> = emptyList(),
+    val images: List<UIMessagePart.Image> = emptyList(),
+    val audio: List<UIMessagePart.Audio> = emptyList(),
 ) {
-    val signature: String get() = turnSignature(role, rawText)
+    val signature: String get() = buildString {
+        append(turnSignature(role, rawText))
+        images.forEach { append("|image:${it.url.length}:${it.url.hashCode()}") }
+        audio.forEach { append("|audio:${it.url.length}:${it.url.hashCode()}") }
+    }
 }
 
 /**
@@ -200,11 +208,14 @@ internal fun nativeToolMatchFailureReason(
  * Text-only assistant turns retain their original MODEL role.
  * Unexecuted/malformed tool parts return null instead of inventing a tool result.
  */
-internal fun nativeReplayHistory(history: List<Turn>): List<Message>? {
+internal fun nativeReplayHistory(
+    history: List<Turn>,
+    userMessage: (Turn) -> Message = { Message.user(it.rawText) },
+): List<Message>? {
     val result = mutableListOf<Message>()
     for (turn in history) {
         when (turn.role) {
-            ROLE_USER -> result.add(Message.user(turn.rawText))
+            ROLE_USER -> result.add(userMessage(turn))
             ROLE_ASSISTANT -> {
                 if (turn.nativeParts.none { it is NativeReplayPart.Tool }) {
                     result.add(Message.model(turn.rawText))
@@ -259,9 +270,12 @@ private fun JsonElement.toToolValue(): Any? = when (this) {
 /** Rebuild a TOOL-ending assistant turn with real MODEL(toolCalls) -> TOOL roles.
  * The final TOOL message must be sent through sendMessageAsync, not prefilled twice.
  */
-internal fun nativeColdToolContinuation(history: List<Turn>): Pair<List<Message>, Message>? {
+internal fun nativeColdToolContinuation(
+    history: List<Turn>,
+    userMessage: (Turn) -> Message = { Message.user(it.rawText) },
+): Pair<List<Message>, Message>? {
     if (history.lastOrNull()?.role != ROLE_ASSISTANT) return null
-    val messages = nativeReplayHistory(history) ?: return null
+    val messages = nativeReplayHistory(history, userMessage) ?: return null
     if (messages.size < 2 || messages.last().role != Role.TOOL ||
         messages[messages.lastIndex - 1].toolCalls.isEmpty()
     ) return null
@@ -780,10 +794,12 @@ class LiteRtRuntime(
             "Unsupported LiteRT backend: $preferredAccel"
         }
         val accel = preferredAccel
-        val nativeInitialMessages = nativeInitialHistory(initialTurnHistory).orEmpty()
-        val nativeInitialSignatures = if (initialTurnHistory.lastOrNull()?.role == ROLE_USER) {
-            initialTurnHistory.dropLast(1).map { it.signature }
-        } else emptyList()
+        // Only resolve historical media when a new Conversation is really needed.
+        val nativeHistory by lazy { nativeInitialHistory(initialTurnHistory, ::nativeUserMessage) }
+        val nativeInitialMessages by lazy { nativeHistory.orEmpty() }
+        val nativeInitialSignatures by lazy {
+            if (nativeHistory != null) initialTurnHistory.dropLast(1).map { it.signature } else emptyList()
+        }
 
         // Probe the file for speculative-decoding support BEFORE building the engine.
         val supportsSpeculativeDecoding = try {
@@ -1148,12 +1164,19 @@ class LiteRtRuntime(
         initialMessages: List<Message> = emptyList(),
     ) {
         try { instance.conversation.close() } catch (_: Throwable) {}
-        instance.conversation = createConversationWithFlags(
-            engine = instance.engine,
-            backend = acceleratorToBackend(instance.engineKey.accelerator),
-            spec = instance.conversationSpec,
-            initialMessages = initialMessages,
-        )
+        instance.conversation = try {
+            createConversationWithFlags(
+                engine = instance.engine,
+                backend = acceleratorToBackend(instance.engineKey.accelerator),
+                spec = instance.conversationSpec,
+                initialMessages = initialMessages,
+            )
+        } catch (t: Throwable) {
+            try { instance.engine.close() } catch (_: Throwable) {}
+            loaded = null
+            publishBackendStatus()
+            throw t
+        }
         instance.pristineConversation = true
         instance.pendingToolBatch = null
         instance.completedToolTurn = null
@@ -1264,7 +1287,7 @@ class LiteRtRuntime(
             // Construct a role-correct Cold fallback only for actual executed tool parts.
             // Never parse tool-looking text generated by the model into executable calls.
             val coldToolReplay = if (nativeToolResults == null && !hasMedia && toolResults.isNotEmpty()) {
-                nativeColdToolContinuation(history)
+                nativeColdToolContinuation(history, ::nativeUserMessage)
             } else null
             val planned = planTurns(instance.processed, historySignatures, hasMedia)
             // Only a newly appended USER can be submitted as a user message.
@@ -1286,15 +1309,15 @@ class LiteRtRuntime(
                 TurnPlan.Cold -> {
                     // Both normal Cold and tool-result Cold use real SDK roles.
                     // The compatibility text blob remains for unsupported non-tool agent turns.
-                    val nativeHistory = coldToolReplay?.first ?: nativeInitialHistory(history)
-                    val nativeSignatures = if (nativeHistory != null && coldToolReplay == null) {
+                    val expectedSignatures = if (history.lastOrNull()?.role == ROLE_USER) {
                         history.dropLast(1).map { it.signature }
                     } else emptyList()
-                    // TOOL replay injects a different initialMessages list; even a pristine
-                    // empty Conversation must be rebuilt before submitting its TOOL reply.
-                    val canReusePristine = coldToolReplay == null &&
-                        instance.pristineConversation &&
-                        instance.initialHistorySignatures == nativeSignatures
+                    // Reuse a pristine matching native prefix without re-decoding attachments.
+                    val canReusePristine = coldToolReplay == null && history.lastOrNull()?.role == ROLE_USER &&
+                        instance.pristineConversation && instance.initialHistorySignatures == expectedSignatures
+                    val nativeHistory = if (canReusePristine) emptyList() else
+                        coldToolReplay?.first ?: nativeInitialHistory(history, ::nativeUserMessage)
+                    val nativeSignatures = if (nativeHistory != null && coldToolReplay == null) expectedSignatures else emptyList()
                     if (!canReusePristine) {
                         recreateConversationLocked(instance, nativeHistory.orEmpty())
                         instance.initialHistorySignatures = nativeSignatures
@@ -1356,13 +1379,13 @@ class LiteRtRuntime(
                         message.channels["thought"]?.let { thinking ->
                             if (thinking.isNotEmpty()) {
                                 onThinking?.invoke(thinking)
-                                trySend(StreamEvent.ThinkingDelta(thinking))
+                                trySendBlocking(StreamEvent.ThinkingDelta(thinking))
                             }
                         }
                         val text = message.toString()
                         if (text.isNotEmpty()) {
                             responseBuilder.append(text)
-                            trySend(StreamEvent.Delta(responseBuilder.toString()))
+                            trySendBlocking(StreamEvent.Delta(responseBuilder.toString()))
                         }
                         val calls = message.toolCalls
                         if (calls.size > emittedToolCalls) {
@@ -1375,7 +1398,7 @@ class LiteRtRuntime(
                             }
                             emittedToolCalls = calls.size
                             requestedTools.addAll(fresh)
-                            trySend(StreamEvent.ToolCalls(fresh))
+                            trySendBlocking(StreamEvent.ToolCalls(fresh))
                         }
                     }
                     override fun onDone() {
@@ -1541,6 +1564,23 @@ class LiteRtRuntime(
         }
     }
 
+    /** Reconstruct media from the original saved attachment when a Cold prefix is rebuilt. */
+    private fun nativeUserMessage(turn: Turn): Message {
+        val parts = buildList<Content> {
+            for (image in turn.images) {
+                val bitmap = image.toLiteRtBitmap(context)
+                    ?: error("Cannot restore a historical LiteRT image attachment")
+                try { add(Content.ImageBytes(bitmap.toPngByteArray())) } finally { bitmap.recycle() }
+            }
+            for (audio in turn.audio) {
+                add(Content.AudioBytes(audio.toLiteRtAudioBytes(context)
+                    ?: error("Cannot restore a historical LiteRT audio attachment")))
+            }
+            if (turn.rawText.isNotBlank()) add(Content.Text(turn.rawText))
+        }
+        return Message.user(Contents.of(parts))
+    }
+
     private fun Bitmap.toPngByteArray(): ByteArray {
         val stream = ByteArrayOutputStream()
         this.compress(Bitmap.CompressFormat.PNG, 100, stream)
@@ -1569,9 +1609,12 @@ class LiteRtRuntime(
          * it is passed separately to sendMessageAsync and includes current-turn media.
          * Null means this is an agent/tool continuation, not a fresh user turn.
          */
-        internal fun nativeInitialHistory(history: List<Turn>): List<Message>? {
+        internal fun nativeInitialHistory(
+            history: List<Turn>,
+            userMessage: (Turn) -> Message = { Message.user(it.rawText) },
+        ): List<Message>? {
             if (history.lastOrNull()?.role != ROLE_USER) return null
-            return nativeReplayHistory(history.dropLast(1))
+            return nativeReplayHistory(history.dropLast(1), userMessage)
         }
 
         internal fun shouldRecreateForCold(pristineConversation: Boolean): Boolean =

@@ -8,6 +8,7 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
@@ -207,10 +208,10 @@ class LiteRtProvider(
         require(promptByteBudget(effectiveMaxNumTokens, runtimeSettings.responseReservePercent) > 0) {
             "The selected LiteRT context leaves no input budget; increase context or reduce response reserve."
         }
-        if (contextCeiling != null && requestedMaxNumTokens > contextCeiling) {
+        if (requestedMaxNumTokens > effectiveMaxNumTokens) {
             Log.w(
                 TAG,
-                "clamped maxNumTokens $requestedMaxNumTokens -> $contextCeiling for " +
+                "clamped maxNumTokens $requestedMaxNumTokens -> $effectiveMaxNumTokens for " +
                     "${params.model.modelId}: the model cannot hold more than its declared " +
                     "ceiling, and asking for more faults the native executor",
             )
@@ -268,7 +269,9 @@ class LiteRtProvider(
         )
         var toolBytesUsed = 0
         val droppedTools = mutableListOf<String>()
-        val declarations = params.tools.mapNotNull { tool ->
+        val toolCapable = ModelAbility.TOOL in params.model.abilities ||
+            LiteRtModelMetadata.canDeclareTools(params.model.modelId, LiteRtModelMetadata.inspect(java.io.File(modelPath))?.tools)
+        val declarations = (if (toolCapable) params.tools else emptyList()).mapNotNull { tool ->
             val declaration = LiteRtToolDeclaration(tool)
             val cost = declaration.declarationJson.toByteArray(Charsets.UTF_8).size + TOOL_OVERHEAD_BYTES
             if (toolBytesUsed + cost > toolByteBudget) {
@@ -342,7 +345,7 @@ class LiteRtProvider(
                     "Shorten the message, reduce enabled tools, or use a larger context model."
             )
         }
-        val turns = trimmed.map { it.toTurn(historyBudget) }
+        val turns = trimmed.map { it.toTurn(historyBudget, config) }
         // The final ASSISTANT message contains the host's executed tool parts.
         // Preserve call ids and arguments for exact matching against SDK tool calls.
         // Earlier tool parts in the same assistant turn are harmless: the runtime only
@@ -376,6 +379,13 @@ class LiteRtProvider(
         // Match Box: use the model's explicit vision configuration. A failed init is
         // reported instead of silently changing the model's capabilities.
         val effectiveSupportImage = config.supportsImage && config.visionAccelerator != null
+        val latestUser = trimmed.lastOrNull()?.takeIf { it.role == MessageRole.USER }
+        require(effectiveSupportImage || latestUser?.parts?.none { it is UIMessagePart.Image } != false) {
+            "The selected local model does not support image input"
+        }
+        require(config.supportsAudio || latestUser?.parts?.none { it is UIMessagePart.Audio } != false) {
+            "The selected local model does not support audio input"
+        }
 
         // ---- Engine load with full per-model + per-call config ----
         val requestId = java.util.UUID.randomUUID().toString()
@@ -419,6 +429,7 @@ class LiteRtProvider(
         } catch (t: Throwable) {
             throw translateSdkError(t, effectiveMaxNumTokens)
         }
+        var currentBitmaps: List<android.graphics.Bitmap> = emptyList()
         try {
         // Box-style: do not persist the resolved backend or an implicit fallback.
         // The user's per-model backend preference is the only source of truth.
@@ -477,14 +488,14 @@ class LiteRtProvider(
             // them why; otherwise it's a silent no-op (text-only model, no attachment).
             emptyList()
         }
-        val turnAudio: List<ByteArray> = if (config.supportsAudio) {
-            lastUser?.parts
-                ?.filterIsInstance<UIMessagePart.Audio>()
-                ?.mapNotNull { it.toLiteRtAudioBytes(context) }
-                .orEmpty()
-        } else {
-            emptyList()
+        currentBitmaps = turnImages
+        require(!imageDecision.forwardImages || turnImages.size == userImageParts.size) {
+            "Cannot read one or more image attachments"
         }
+        val audioParts = lastUser?.parts?.filterIsInstance<UIMessagePart.Audio>().orEmpty()
+        val turnAudio: List<ByteArray> = if (config.supportsAudio) {
+            audioParts.map { it.toLiteRtAudioBytes(context) ?: error("Cannot read an audio attachment") }
+        } else emptyList()
         if (turnImages.isNotEmpty() || turnAudio.isNotEmpty()) {
             Log.i(
                 TAG,
@@ -588,6 +599,7 @@ class LiteRtProvider(
             contextHistoryTrimmed = trimmed.size != untrimmedTurnCount,
         ))
         } finally {
+            currentBitmaps.forEach { it.recycle() }
             // Cancellation must also release the ensureLoaded→streamTurns reservation.
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                 runtime.releasePendingStream(modelPath, requestId)
@@ -611,9 +623,17 @@ class LiteRtProvider(
     private fun renderTurnRawText(msg: UIMessage, historyBudget: Int): String = buildString {
         when (msg.role) {
             MessageRole.USER -> {
-                append(
-                    msg.parts.filterIsInstance<UIMessagePart.Text>().joinToString("") { it.text }
-                )
+                msg.parts.forEach { part ->
+                    when (part) {
+                        is UIMessagePart.Text -> append(part.text)
+                        is UIMessagePart.Notice -> append(part.text)
+                        is UIMessagePart.Image -> append("\n[Image attachment]")
+                        is UIMessagePart.Audio -> append("\n[Audio attachment]")
+                        is UIMessagePart.Document -> append("\n[Document: ${part.fileName}]")
+                        is UIMessagePart.Video -> append("\n[Video attachment]")
+                        else -> Unit
+                    }
+                }
             }
             MessageRole.ASSISTANT -> {
                 // Walk the parts in order so an assistant turn that interleaves text +
@@ -645,7 +665,7 @@ class LiteRtProvider(
     }
 
     /** Convert a message into a [Turn] for the runtime's warm/cold KV-cache decision. */
-    private fun UIMessage.toTurn(historyBudget: Int): Turn {
+    private fun UIMessage.toTurn(historyBudget: Int, config: LiteRtModelConfig): Turn {
         val turnRole = when (this.role) {
             MessageRole.USER -> ROLE_USER
             MessageRole.ASSISTANT -> ROLE_ASSISTANT
@@ -671,7 +691,11 @@ class LiteRtProvider(
                 }
             }
         } else emptyList()
-        return Turn(turnRole, renderTurnRawText(this, historyBudget), replayParts)
+        return Turn(
+            turnRole, renderTurnRawText(this, historyBudget), replayParts,
+            images = if (role == MessageRole.USER && config.supportsImage && config.visionAccelerator != null) parts.filterIsInstance<UIMessagePart.Image>() else emptyList(),
+            audio = if (role == MessageRole.USER && config.supportsAudio) parts.filterIsInstance<UIMessagePart.Audio>() else emptyList(),
+        )
     }
 
     /**

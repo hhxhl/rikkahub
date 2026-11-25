@@ -25,6 +25,20 @@ import org.junit.Test
  */
 class LiteRtRuntimeTest {
 
+    @Test
+    fun `attachment identity is part of warm prefix and cold replay receives original attachment`() {
+        val first = Turn(ROLE_USER, "picture", images = listOf(me.rerere.ai.ui.UIMessagePart.Image("file:///one.png")))
+        val edited = first.copy(images = listOf(me.rerere.ai.ui.UIMessagePart.Image("file:///two.png")))
+        assertTrue(first.signature != edited.signature)
+        val seen = mutableListOf<Turn>()
+        val history = LiteRtRuntime.nativeInitialHistory(listOf(first, Turn(ROLE_USER, "follow up"))) { turn ->
+            seen += turn
+            com.google.ai.edge.litertlm.Message.user(turn.rawText)
+        }
+        assertEquals(listOf(first), seen)
+        assertEquals(1, history?.size)
+    }
+
     // ---- planTurns -----------------------------------------------------------------
 
     private val u1 = turnSignature(ROLE_USER, "hello")

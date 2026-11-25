@@ -62,10 +62,17 @@ class LiteRtModelMetadataTest {
     }
 
     @Test
-    fun `unknown HF-URL-pasted model falls back to text + tool`() {
+    fun `unknown HF-URL-pasted model does not advertise unverified tools`() {
         val caps = LiteRtModelMetadata.deriveCapabilities("some-random-model-i-pasted.litertlm")
         assertEquals(listOf(Modality.TEXT), caps.inputModalities)
-        assertEquals(listOf(ModelAbility.TOOL), caps.abilities)
+        assertEquals(emptyList<ModelAbility>(), caps.abilities)
+    }
+
+    @Test
+    fun `SDK capability and known legacy Qwen exports permit tools`() {
+        assertEquals(true, LiteRtModelMetadata.canDeclareTools("unknown.litertlm", true))
+        assertEquals(false, LiteRtModelMetadata.canDeclareTools("unknown.litertlm", false))
+        assertEquals(true, LiteRtModelMetadata.canDeclareTools("Qwen3-0.6B_dynamic_wi4b32_afp32.litertlm", false))
     }
 
     @Test

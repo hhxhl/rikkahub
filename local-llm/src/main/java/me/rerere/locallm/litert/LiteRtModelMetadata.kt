@@ -13,8 +13,7 @@ import java.io.File
  * LiteRT catalog instead of the cloud model definitions.
  *
  * For unknown files (HF-URL-pasted models that aren't in our catalog), falls back to the
- * safest assumption: TEXT-only input, TOOL ability (LiteRT-supported models are typically
- * tool-tuned; DeepSeek-R1-Distill was excluded for this reason).
+ * safest assumption: TEXT-only input and no unverified tool ability.
  */
 object LiteRtModelMetadata {
 
@@ -61,16 +60,22 @@ object LiteRtModelMetadata {
 
     fun modelForFile(file: File, modelId: String = file.name): Model {
         val config = runtimeConfig(file, modelId)
-        val capabilities = deriveCapabilities(modelId)
         val modalities = if (config.supportsImage) listOf(Modality.TEXT, Modality.IMAGE) else listOf(Modality.TEXT)
         val abilities = buildList {
-            if (inspect(file)?.tools == true || ModelAbility.TOOL in capabilities.abilities) add(ModelAbility.TOOL)
+            if (canDeclareTools(modelId, inspect(file)?.tools)) add(ModelAbility.TOOL)
             if (config.supportsThinking) add(ModelAbility.REASONING)
         }
         return Model(modelId = modelId, displayName = LiteRtCatalog.displayNameFor(modelId),
             inputModalities = modalities, abilities = abilities,
             contextLength = (LiteRtModelFile.resolveContextCeiling(file, modelId, config) ?: config.maxTokens).coerceAtMost(32768))
     }
+
+    /** Trust a positive native declaration or a known tool-tuned export/family.
+     * Legacy Qwen files often omit this metadata. Other unknown models remain opt-in.
+     */
+    internal fun canDeclareTools(modelId: String, nativeTools: Boolean?): Boolean =
+        nativeTools == true || LiteRtModelDefaults.isCuratedModel(modelId) ||
+            Regex("qwen[_.-]?[23]", RegexOption.IGNORE_CASE).containsMatchIn(modelId)
 
     data class Capabilities(
         val inputModalities: List<Modality>,
@@ -83,9 +88,7 @@ object LiteRtModelMetadata {
      * Mapping rules (matches [LiteRtModelConfig]):
      *   - `supportsImage = true`  -> add Modality.IMAGE.
      *   - `supportsThinking = true` -> add ModelAbility.REASONING.
-     *   - ModelAbility.TOOL is always added (every model we ship through the LiteRT
-     *     catalog is tool-tuned; the agent loop depends on it; DeepSeek-R1-Distill was
-     *     deliberately removed from the catalog because it isn't tool-tuned).
+     *   - ModelAbility.TOOL is added for known tool-tuned exports, or from SDK metadata.
      */
     fun deriveCapabilities(modelFile: String): Capabilities {
         val config = LiteRtModelDefaults.forModelFile(modelFile)
@@ -94,7 +97,7 @@ object LiteRtModelMetadata {
             if (config.supportsImage) add(Modality.IMAGE)
         }
         val abilities = buildList {
-            add(ModelAbility.TOOL)
+            if (canDeclareTools(modelFile, null)) add(ModelAbility.TOOL)
             if (config.supportsThinking) add(ModelAbility.REASONING)
         }
         return Capabilities(modalities, abilities)
