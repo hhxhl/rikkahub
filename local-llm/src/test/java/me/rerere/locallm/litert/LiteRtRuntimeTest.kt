@@ -39,6 +39,26 @@ class LiteRtRuntimeTest {
         assertEquals(1, history?.size)
     }
 
+    @Test
+    fun `Cold replay retains successive tool-only batch boundaries`() {
+        val first = NativeReplayPart.Tool("first", "{}", "one", batchId = "batch-1")
+        val second = NativeReplayPart.Tool("second", "{}", "two", batchId = "batch-2")
+        val messages = nativeReplayHistory(listOf(Turn(ROLE_ASSISTANT, "tools", listOf(first, second))))!!
+        assertEquals(4, messages.size)
+        assertEquals("first", messages[0].toolCalls.single().name)
+        assertEquals("second", messages[2].toolCalls.single().name)
+        assertEquals(com.google.ai.edge.litertlm.Role.TOOL, messages[1].role)
+        assertEquals(com.google.ai.edge.litertlm.Role.TOOL, messages[3].role)
+    }
+
+    @Test
+    fun `bounded attachment reads reject oversized streams`() {
+        assertEquals(4, java.io.ByteArrayInputStream(ByteArray(4)).readLiteRtBounded(4).size)
+        assertTrue(runCatching {
+            java.io.ByteArrayInputStream(ByteArray(5)).readLiteRtBounded(4)
+        }.isFailure)
+    }
+
     // ---- planTurns -----------------------------------------------------------------
 
     private val u1 = turnSignature(ROLE_USER, "hello")

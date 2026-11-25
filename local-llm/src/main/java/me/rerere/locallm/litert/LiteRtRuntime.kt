@@ -87,7 +87,12 @@ fun turnSignature(role: String, text: String): String = "$role|${text.length}|${
  */
 sealed interface NativeReplayPart {
     data class Text(val text: String) : NativeReplayPart
-    data class Tool(val name: String, val argumentsJson: String, val output: String?) : NativeReplayPart
+    data class Tool(
+        val name: String,
+        val argumentsJson: String,
+        val output: String?,
+        val batchId: String? = null,
+    ) : NativeReplayPart
 }
 
 data class Turn(
@@ -105,7 +110,7 @@ data class Turn(
             append("|structured:${contentDigest(nativeParts.joinToString(separator = "") { part ->
                 when (part) {
                     is NativeReplayPart.Text -> "text:${part.text.length}:${part.text}"
-                    is NativeReplayPart.Tool -> listOf(part.name, part.argumentsJson, part.output).joinToString(separator = "") {
+                    is NativeReplayPart.Tool -> listOf(part.name, part.argumentsJson, part.output, part.batchId).joinToString(separator = "") {
                         if (it == null) "-1:" else "${it.length}:$it"
                     }.let { "tool:$it" }
                 }
@@ -133,6 +138,7 @@ data class RuntimeToolResult(
 internal data class PendingToolBatch(
     val anchorSignatures: List<String>,
     val calls: List<RuntimeToolCall>,
+    val assistantPrefix: String? = null,
 )
 
 /**
@@ -181,6 +187,7 @@ internal fun matchNativeToolResults(
 ): List<RuntimeToolResult>? {
     if (pending == null || pending.calls.isEmpty() || history.lastOrNull()?.role != ROLE_ASSISTANT) return null
     if (history.dropLast(1).map { it.signature } != pending.anchorSignatures) return null
+    if (pending.assistantPrefix != null && !history.last().rawText.startsWith(pending.assistantPrefix)) return null
     if (supplied.map { it.id }.distinct().size != supplied.size) return null
     val byId = supplied.associateBy { it.id }
     return pending.calls.map { call ->
@@ -207,6 +214,7 @@ internal fun nativeToolMatchFailureReason(
     if (history.dropLast(1).map { it.signature } != pending.anchorSignatures) {
         return "history-prefix-changed-or-trimmed"
     }
+    if (pending.assistantPrefix != null && !history.last().rawText.startsWith(pending.assistantPrefix)) return "assistant-prefix-changed"
     if (supplied.map { it.id }.distinct().size != supplied.size) return "duplicate-result-id"
     val byId = supplied.associateBy { it.id }
     for (call in pending.calls) {
@@ -246,9 +254,12 @@ internal fun nativeReplayHistory(
                         is NativeReplayPart.Tool -> {
                             val calls = mutableListOf<ToolCall>()
                             val responses = mutableListOf<Content>()
-                            // Adjacent tool parts belong to the same MODEL tool-call batch.
+                            // Preserve original SDK generation batches, even when
+                            // successive tool-only responses have no intervening text.
+                            val batchId = part.batchId
                             while (i < turn.nativeParts.size) {
                                 val tool = turn.nativeParts[i] as? NativeReplayPart.Tool ?: break
+                                if (tool.batchId != batchId) break
                                 val args = runCatching {
                                     Json.parseToJsonElement(tool.argumentsJson).let { it as? JsonObject }
                                 }.getOrNull() ?: return null
@@ -1477,7 +1488,10 @@ class LiteRtRuntime(
                                 val anchor = if (history.lastOrNull()?.role == ROLE_ASSISTANT) {
                                     historySignatures.dropLast(1)
                                 } else historySignatures
-                                instance.pendingToolBatch = PendingToolBatch(anchor, requestedTools.toList())
+                                instance.pendingToolBatch = PendingToolBatch(
+                                    anchor, requestedTools.toList(),
+                                    assistantPrefix = history.lastOrNull()?.takeIf { it.role == ROLE_ASSISTANT }?.rawText,
+                                )
                             }
                         }
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
@@ -1554,9 +1568,11 @@ class LiteRtRuntime(
                     }
                     // A late callback may have raced cancellation. Invalidate its state
                     // after acknowledgement; a quarantined instance will never be reused.
-                    instance.processed.clear()
-                    instance.pendingToolBatch = null
-                    instance.completedToolTurn = null
+                    if (instance.unacknowledgedStop == null) {
+                        instance.processed.clear()
+                        instance.pendingToolBatch = null
+                        instance.completedToolTurn = null
+                    }
                 }
             }
         } } finally {

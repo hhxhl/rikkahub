@@ -9,7 +9,38 @@ import android.util.Base64
 import android.net.Uri
 import me.rerere.ai.ui.UIMessagePart
 import java.io.File
+import java.io.InputStream
+import java.io.ByteArrayOutputStream
 import java.net.URL
+
+private const val MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024
+
+/** Bounded input even for content/HTTP streams with no trustworthy length header. */
+internal fun InputStream.readLiteRtBounded(maxBytes: Int = MAX_ATTACHMENT_BYTES): ByteArray {
+    require(maxBytes > 0)
+    val out = ByteArrayOutputStream(minOf(8192, maxBytes))
+    val buffer = ByteArray(8192)
+    var total = 0
+    while (true) {
+        val read = read(buffer)
+        if (read < 0) break
+        if (read == 0) continue
+        require(read <= maxBytes - total) { "LiteRT attachment exceeds $maxBytes bytes" }
+        out.write(buffer, 0, read)
+        total += read
+    }
+    return out.toByteArray()
+}
+
+private fun decodeBoundedDataUrl(url: String): ByteArray {
+    val base64 = url.substringAfter(',', "")
+    require(base64.length.toLong() <= ((MAX_ATTACHMENT_BYTES.toLong() + 2) / 3) * 4 + 4096) {
+        "LiteRT attachment exceeds encoded size limit"
+    }
+    return Base64.decode(base64, Base64.DEFAULT).also {
+        require(it.size <= MAX_ATTACHMENT_BYTES) { "LiteRT attachment exceeds size limit" }
+    }
+}
 
 /**
  * Adapter moved from Agent's ai/util/FileEncoder.kt, kept entirely inside the LiteRT module.
@@ -20,13 +51,13 @@ internal fun UIMessagePart.Image.toLiteRtBitmap(context: Context, maxDimension: 
     runCatching {
         val uri = Uri.parse(url)
         val bytes = when (uri.scheme?.lowercase()) {
-            "data" -> Base64.decode(url.substringAfter(',', ""), Base64.DEFAULT)
-            "file" -> File(uri.path ?: return@runCatching null).readBytes()
-            "content" -> context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            "data" -> decodeBoundedDataUrl(url)
+            "file" -> File(uri.path ?: return@runCatching null).inputStream().use { it.readLiteRtBounded() }
+            "content" -> context.contentResolver.openInputStream(uri)?.use { it.readLiteRtBounded() }
             "http", "https" -> URL(url).openConnection().apply {
                 connectTimeout = 8000
                 readTimeout = 15000
-            }.getInputStream().use { it.readBytes() }
+            }.getInputStream().use { it.readLiteRtBounded() }
             else -> null
         } ?: return@runCatching null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -59,13 +90,13 @@ internal fun UIMessagePart.Image.toLiteRtBitmap(context: Context, maxDimension: 
 internal fun UIMessagePart.Audio.toLiteRtAudioBytes(context: Context): ByteArray? = runCatching {
     val uri = Uri.parse(url)
     when (uri.scheme?.lowercase()) {
-        "data" -> Base64.decode(url.substringAfter(',', ""), Base64.DEFAULT)
-        "file" -> File(uri.path ?: return@runCatching null).readBytes()
-        "content" -> context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        "data" -> decodeBoundedDataUrl(url)
+        "file" -> File(uri.path ?: return@runCatching null).inputStream().use { it.readLiteRtBounded() }
+        "content" -> context.contentResolver.openInputStream(uri)?.use { it.readLiteRtBounded() }
         "http", "https" -> URL(url).openConnection().apply {
             connectTimeout = 8000
             readTimeout = 15000
-        }.getInputStream().use { it.readBytes() }
+        }.getInputStream().use { it.readLiteRtBounded() }
         else -> null
     }
 }.getOrNull()

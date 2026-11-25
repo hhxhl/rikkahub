@@ -238,6 +238,16 @@ class LiteRtSystemMessageLimitTest {
 /** Verify the configured output reserve is applied to system, tool and history budgets. */
 class LiteRtResponseReserveBudgetTest {
     @Test
+    fun `explicit output maximum fits estimated remaining context`() {
+        assertEquals(3000, LiteRtProvider.outputTokenLimit(4096, 2000, 4096))
+        assertEquals(256, LiteRtProvider.outputTokenLimit(4096, 2000, 256))
+        assertEquals(null, LiteRtProvider.outputTokenLimit(4096, 2000, null))
+        assertEquals("litert-request", localToolBatchId("litert-request-tool-0"))
+        assertEquals(null, localToolBatchId("external-id"))
+    }
+
+
+    @Test
     fun `25 percent preserves the previous 1280-token default`() {
         assertEquals(1728, LiteRtProvider.promptByteBudget(1280, 25))
         assertEquals(LiteRtProvider.promptByteBudget(1280), LiteRtProvider.promptByteBudget(1280, 25))
