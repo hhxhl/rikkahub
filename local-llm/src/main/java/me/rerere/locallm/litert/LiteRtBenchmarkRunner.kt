@@ -85,13 +85,10 @@ class LiteRtBenchmarkRunner(
         require(modelFile.isFile) { "Model file does not exist: $modelId" }
         // The native benchmark does not know our EngineConfig clamp. In particular,
         // requesting more than a baked ekvNNNN cache may crash JNI instead of throwing.
-        val ceiling = LiteRtModelFile.resolveContextCeiling(
-            modelFile, modelId, LiteRtModelDefaults.forModelFile(modelId),
-        )
-        if (ceiling != null) {
-            require(prefillTokens.toLong() + decodeTokens + 32L <= ceiling) {
-                "Prefill + decode + 32 must fit the model's $ceiling-token KV cache"
-            }
+        val config = LiteRtModelMetadata.runtimeConfig(modelFile, modelId)
+        val ceiling = LiteRtModelFile.resolveContextCeiling(modelFile, modelId, config) ?: config.maxTokens
+        require(prefillTokens.toLong() + decodeTokens + 32L <= ceiling) {
+            "Prefill + decode + 32 must fit the model's $ceiling-token safe context"
         }
 
         runtime.withExclusiveBenchmark(modelPath, accelerator) {

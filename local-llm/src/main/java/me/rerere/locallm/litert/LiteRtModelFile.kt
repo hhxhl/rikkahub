@@ -118,7 +118,7 @@ internal object LiteRtModelFile {
             }
             return packaged
         }
-        return metadataDefault ?: config.maxContextLength
+        return metadataDefault ?: LiteRtModelMetadata.inspect(file)?.ceiling ?: config.maxContextLength
     }
 
     /**

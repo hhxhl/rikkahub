@@ -175,6 +175,15 @@ class LiteRtToolDeclarationBudgetTest {
 class LiteRtEngineContextTokensTest {
 
     @Test
+    fun `automatic capacity uses known ceiling but unknown capacity stays conservative`() {
+        val config = LiteRtModelDefaults.forModelFile("unknown.litertlm")
+        assertEquals(8192, LiteRtProvider.configuredContextTokens(config, 8192, null))
+        assertEquals(2048, LiteRtProvider.configuredContextTokens(config, 8192, 2048))
+        assertEquals(4096, LiteRtProvider.configuredContextTokens(config, null, 32768))
+        assertEquals(32768, LiteRtProvider.configuredContextTokens(config, 65536, null))
+    }
+
+    @Test
     fun `the allocation wins when the file ceiling is higher`() {
         // gemma-4-E2B: catalog allocates 4096, the file could hold 32768.
         assertEquals(4096, LiteRtProvider.engineContextTokens(4096, 32768))

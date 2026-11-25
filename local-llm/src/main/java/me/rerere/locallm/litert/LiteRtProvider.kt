@@ -131,14 +131,8 @@ class LiteRtProvider(
 
     override suspend fun listModels(providerSetting: ProviderSetting.LiteRtLocal): List<Model> {
         val installed = prefs.installedModels(LocalRuntime.LiteRT)
-        return installed.map { (fileName, _) ->
-            Model(
-                modelId = fileName,
-                // The chat picker shows this. Raw filenames like
-                // "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm" are
-                // unreadable next to cloud model names, so prefer the catalog's label.
-                displayName = LiteRtCatalog.displayNameFor(fileName),
-            )
+        return installed.mapNotNull { (fileName, path) ->
+            java.io.File(path).takeIf { it.isFile }?.let { LiteRtModelMetadata.modelForFile(it, fileName) }
         }
     }
 
@@ -164,6 +158,7 @@ class LiteRtProvider(
         messages: List<UIMessage>,
         params: TextGenerationParams,
     ): Flow<StreamChunk> = flow {
+        runtime.withGenerationReservation {
         val installed = prefs.installedModels(LocalRuntime.LiteRT)
         val modelPath = installed[params.model.modelId]
             ?: throw IllegalStateException("Model ${params.model.modelId} not installed")
@@ -186,7 +181,7 @@ class LiteRtProvider(
         // Per-model defaults curated to mirror Gallery's `model_allowlists/1_0_13.json`
         // (topK / topP / temperature / maxTokens / multimodal flags / speculative decoding).
         // For HF-pasted models that aren't in the table, this returns the FALLBACK config.
-        val config = LiteRtModelDefaults.forModelFile(params.model.modelId)
+        val config = LiteRtModelMetadata.runtimeConfig(java.io.File(modelPath), params.model.modelId)
         // The model's KV cache ceiling, most specific source first:
         //   1. explicit exported `ekvNNNN` cache marker (if present),
         //   2. the metadata context length (conservative when export size is unknown),
@@ -204,8 +199,11 @@ class LiteRtProvider(
         // User-set max-context override: never beyond the identified file cache ceiling.
         val runtimeSettings = prefs.liteRtRuntimeSettings(LocalRuntime.LiteRT)
         val maxNumTokensOverride = runtimeSettings.maxNumTokensOverride
-        val requestedMaxNumTokens = maxNumTokensOverride ?: config.maxTokens
-        val effectiveMaxNumTokens = engineContextTokens(requestedMaxNumTokens, contextCeiling)
+        val requestedMaxNumTokens = maxNumTokensOverride ?: contextCeiling?.coerceAtMost(32768) ?: config.maxTokens
+        val effectiveMaxNumTokens = configuredContextTokens(config, contextCeiling, maxNumTokensOverride)
+        require(promptByteBudget(effectiveMaxNumTokens, runtimeSettings.responseReservePercent) > 0) {
+            "The selected LiteRT context leaves no input budget; increase context or reduce response reserve."
+        }
         if (contextCeiling != null && requestedMaxNumTokens > contextCeiling) {
             Log.w(
                 TAG,
@@ -406,8 +404,8 @@ class LiteRtProvider(
                 // chat turns to avoid biasing normal language.
                 constrainedDecoding = nativeTools.isNotEmpty(),
                 topK = config.topK,
-                topP = config.topP,
-                temperature = config.temperature,
+                topP = params.topP?.toDouble() ?: config.topP,
+                temperature = params.temperature?.toDouble() ?: config.temperature,
                 initialTurnHistory = turns,
             )
         } catch (corrupt: LiteRtModelCorruptException) {
@@ -438,6 +436,12 @@ class LiteRtProvider(
         // matching the old positional-append merge behaviour.
         val textId = "$streamId-text"
         var previousCumulative = ""
+        var reasoningSequence = 0
+        var activeReasoningId: String? = null
+        suspend fun endReasoning() {
+            activeReasoningId?.let { emit(StreamChunk.ReasoningEnd(it)) }
+            activeReasoningId = null
+        }
         val fullResponseBuilder = StringBuilder()
 
         // Extract images + audio from the LAST USER message only (the new turn). Earlier
@@ -445,7 +449,7 @@ class LiteRtProvider(
         // text render; the SDK's vision/audio executors only consume current-turn input.
         // Decode here so the runtime gets ready-to-use Bitmaps / encoded audio bytes and
         // doesn't have to know about content URIs.
-        val lastUser = messages.lastOrNull { it.role == MessageRole.USER }
+        val lastUser = trimmed.lastOrNull()?.takeIf { it.role == MessageRole.USER }
         val userImageParts = lastUser?.parts
             ?.filterIsInstance<UIMessagePart.Image>()
             .orEmpty()
@@ -506,8 +510,16 @@ class LiteRtProvider(
                     toolResults = toolResults,
                     images = turnImages,
                     audioClips = turnAudio,
+                    maxOutputToken = params.maxTokens?.takeIf { it > 0 }?.coerceAtMost(effectiveMaxNumTokens),
                 ).collect { event ->
                     when (event) {
+                        is StreamEvent.ThinkingDelta -> {
+                            val id = activeReasoningId ?: "$streamId-thought-${reasoningSequence++}".also {
+                                activeReasoningId = it
+                                emit(StreamChunk.ReasoningStart(it))
+                            }
+                            emit(StreamChunk.ReasoningDelta(id, event.text))
+                        }
                         is StreamEvent.Delta -> {
                             val cumulative = event.cumulative
                             // Defensive: if the SDK ever emits a non-monotonic cumulative (e.g.
@@ -525,6 +537,7 @@ class LiteRtProvider(
                             fullResponseBuilder.append(cumulative)
 
                             if (delta.isNotEmpty()) {
+                                endReasoning()
                                 emit(StreamChunk.TextDelta(textId, delta))
                             }
                         }
@@ -534,6 +547,7 @@ class LiteRtProvider(
                         }
 
                         is StreamEvent.ToolCalls -> {
+                            endReasoning()
                             // IDs are minted by the runtime and retained until RikkaHub
                             // finishes approval/execution. This allows a later native
                             // Message.tool response to match exactly the original call.
@@ -561,6 +575,7 @@ class LiteRtProvider(
         // then calls back in with the results. Reporting "tool_calls" is what tells the
         // agent loop to do that; reporting "stop" would end the turn with the model's
         // request silently dropped.
+        endReasoning()
         emit(StreamChunk.Finish(
             finishReason = if (toolCallCount > 0) "tool_calls" else "stop",
             contextTokenCount = contextTokenCount,
@@ -570,6 +585,7 @@ class LiteRtProvider(
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                 runtime.releasePendingStream(modelPath, requestId)
             }
+        }
         }
     }
 
@@ -795,6 +811,11 @@ class LiteRtProvider(
          * this one number, so the prompt can never be built for a context larger than the
          * engine that receives it.
          */
+        internal fun configuredContextTokens(config: LiteRtModelConfig, ceiling: Int?, override: Int?): Int {
+            val safeCeiling = (ceiling ?: config.maxTokens).coerceAtMost(32768)
+            return minOf(override ?: safeCeiling, safeCeiling)
+        }
+
         internal fun engineContextTokens(requestedMaxTokens: Int, contextCeiling: Int?): Int =
             contextCeiling?.let { minOf(requestedMaxTokens, it) } ?: requestedMaxTokens
     }

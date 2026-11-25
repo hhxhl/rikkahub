@@ -53,7 +53,6 @@ import me.rerere.locallm.LocalRuntime
 import me.rerere.locallm.LocalRuntimePreferences
 import me.rerere.locallm.ModelInstall
 import me.rerere.locallm.litert.LiteRtCatalog
-import me.rerere.locallm.litert.LiteRtModelDefaults
 import me.rerere.locallm.litert.LiteRtModelMetadata
 import me.rerere.locallm.litert.LiteRtRuntime
 import me.rerere.rikkahub.data.datastore.SettingsStore
@@ -145,18 +144,7 @@ fun ProviderConfigureLiteRT(
     /** Register only after the file exists and has passed the LiteRT-LM magic check. */
     suspend fun registerModel(file: File) {
         prefs.addInstalledModel(LocalRuntime.LiteRT, file.name, file.absolutePath)
-        val metadata = LiteRtModelMetadata.deriveCapabilities(file.name)
-        val config = LiteRtModelDefaults.forModelFile(file.name)
-        val ceiling = LiteRtModelDefaults.contextCeilingFromFileName(file.name)
-            ?: config.maxContextLength
-            ?: config.maxTokens
-        val newModel = Model(
-            modelId = file.name,
-            displayName = LiteRtCatalog.displayNameFor(file.name),
-            inputModalities = metadata.inputModalities,
-            abilities = metadata.abilities,
-            contextLength = ceiling,
-        )
+        val newModel = withContext(Dispatchers.IO) { LiteRtModelMetadata.modelForFile(file) }
         val active = currentProvider
         if (active.models.none { it.modelId == file.name }) {
             currentOnEdit(active.copy(models = active.models + newModel))
@@ -260,7 +248,7 @@ fun ProviderConfigureLiteRT(
             HorizontalDivider()
             LiteRtNumericSettingRow(
                 title = "上下文长度",
-                description = "模型的最大上下文长度；留空使用模型默认值。",
+                description = "Engine 实际运行容量；留空自动使用识别出的安全容量，无法识别时使用模型默认值。",
                 value = tokenField,
                 onValueChange = { tokenField = it },
                 placeholder = "默认",
@@ -307,8 +295,8 @@ fun ProviderConfigureLiteRT(
                 onClick = {
                     submit(LiteRtConfigSection.CONTEXT) {
                         val tokens = tokenField.takeIf(String::isNotBlank)?.toIntOrNull()
-                        require(tokenField.isBlank() || (tokens != null && tokens in 128..32768)) {
-                            "上下文长度请输入 128–32768，或留空"
+                        require(tokenField.isBlank() || (tokens != null && tokens in 512..32768)) {
+                            "上下文长度请输入 512–32768，或留空"
                         }
                         val systemLimit = systemMessageField.toIntOrNull()
                         require(systemLimit != null && systemLimit in 1..32768) {

@@ -221,7 +221,7 @@ class LocalRuntimePreferences(private val context: Context) {
         liteRtRuntimeSettingsFlow(runtime).first()
 
     suspend fun setLiteRtRuntimeSettings(runtime: LocalRuntime, settings: LiteRtRuntimeSettings) {
-        require(settings.maxNumTokensOverride == null || settings.maxNumTokensOverride in 128..32768)
+        require(settings.maxNumTokensOverride == null || settings.maxNumTokensOverride in 512..32768)
         require(settings.systemMessageCharLimit in 1..32768)
         require(settings.responseReservePercent in 10..75)
         require(settings.toolEnableThresholdTokens in 0..32768)

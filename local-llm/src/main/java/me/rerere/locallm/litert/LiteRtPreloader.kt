@@ -67,12 +67,12 @@ class LiteRtPreloader(
         val path = prefs.installedModels(LocalRuntime.LiteRT)[modelFile]
             ?: return LiteRtRuntime.PreloadResult.FAILED
         if (!File(path).isFile) return LiteRtRuntime.PreloadResult.FAILED
-        val config = LiteRtModelDefaults.forModelFile(modelFile)
+        val config = LiteRtModelMetadata.runtimeConfig(File(path), modelFile)
         val contextCeiling = LiteRtModelFile.resolveContextCeiling(
             File(path), modelFile, config,
         )
-        val requestedContext = prefs.maxNumTokensOverride(LocalRuntime.LiteRT) ?: config.maxTokens
-        val tokens = LiteRtProvider.engineContextTokens(requestedContext, contextCeiling)
+        val tokens = LiteRtProvider.configuredContextTokens(config, contextCeiling, prefs.maxNumTokensOverride(LocalRuntime.LiteRT))
+        if (tokens <= 352) return LiteRtRuntime.PreloadResult.FAILED
         val imageSupport = config.supportsImage && config.visionAccelerator != null
         return runtime.preloadEngine(
             modelPath = path,

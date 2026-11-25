@@ -285,6 +285,8 @@ sealed interface StreamEvent {
      *  Downstream computes deltas itself. */
     data class Delta(val cumulative: String) : StreamEvent
 
+    data class ThinkingDelta(val text: String) : StreamEvent
+
     /** Tool calls the model emitted this turn, in the order the model produced them. */
     data class ToolCalls(val calls: List<RuntimeToolCall>) : StreamEvent
 
@@ -425,6 +427,10 @@ class LiteRtRuntime(
     }
 
     private val mutex = Mutex()
+    private val generationMutex = Mutex()
+
+    /** Reserve the full provider request, including the Engine-to-stream handoff. */
+    suspend fun <T> withGenerationReservation(block: suspend () -> T): T = generationMutex.withLock { block() }
     private var loaded: LoadedModel? = null
 
     /** Engine-only prefetch; no Conversation/KV state until a real request arrives. */
@@ -485,7 +491,7 @@ class LiteRtRuntime(
             mutex.withLock {
                 val now = android.os.SystemClock.elapsedRealtime()
                 loaded?.let { current ->
-                    if (now - current.lastUseAtMs >= delay) {
+                    if (current.pendingStreamOwner == null && now - current.lastUseAtMs >= delay) {
                         try { current.conversation.close() } catch (_: Throwable) {}
                         try { current.engine.close() } catch (_: Throwable) {}
                         loaded = null
@@ -683,7 +689,11 @@ class LiteRtRuntime(
     suspend fun releasePendingStream(modelPath: String, requestId: String) = mutex.withLock {
         loaded?.takeIf {
             it.engineKey.modelPath == modelPath && it.pendingStreamOwner == requestId
-        }?.pendingStreamOwner = null
+        }?.let {
+            it.pendingStreamOwner = null
+            it.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
+            armIdleTeardown()
+        }
     }
 
     /** Release only an unused staged Engine, without touching an active Conversation. */
@@ -832,12 +842,19 @@ class LiteRtRuntime(
             // Engine kept, Conversation config changed — recreate just the Conversation.
             // The KV cache is gone, so [processed] must be cleared.
             try { current.conversation.close() } catch (_: Throwable) {}
-            current.conversation = createConversationWithFlags(
-                engine = current.engine,
-                backend = acceleratorToBackend(current.engineKey.accelerator),
-                spec = desiredConversationSpec,
-                initialMessages = nativeInitialMessages,
-            )
+            current.conversation = try {
+                createConversationWithFlags(
+                    engine = current.engine,
+                    backend = acceleratorToBackend(current.engineKey.accelerator),
+                    spec = desiredConversationSpec,
+                    initialMessages = nativeInitialMessages,
+                )
+            } catch (t: Throwable) {
+                try { current.engine.close() } catch (_: Throwable) {}
+                loaded = null
+                publishBackendStatus()
+                throw t
+            }
             current.initialHistorySignatures = nativeInitialSignatures
             current.conversationKey = desiredConversationKey
             current.conversationSpec = desiredConversationSpec
@@ -1175,6 +1192,7 @@ class LiteRtRuntime(
         images: List<Bitmap> = emptyList(),
         audioClips: List<ByteArray> = emptyList(),
         onThinking: ((String) -> Unit)? = null,
+        maxOutputToken: Int? = null,
     ): Flow<StreamEvent> = channelFlow {
         // GPU-boost the inference. Three levers, in order of effectiveness:
         //   1. PerformanceHintManager (API 33+). Opens a hint session for this thread
@@ -1336,7 +1354,10 @@ class LiteRtRuntime(
                 object : MessageCallback {
                     override fun onMessage(message: Message) {
                         message.channels["thought"]?.let { thinking ->
-                            if (thinking.isNotEmpty()) onThinking?.invoke(thinking)
+                            if (thinking.isNotEmpty()) {
+                                onThinking?.invoke(thinking)
+                                trySend(StreamEvent.ThinkingDelta(thinking))
+                            }
                         }
                         val text = message.toString()
                         if (text.isNotEmpty()) {
@@ -1405,6 +1426,7 @@ class LiteRtRuntime(
                     }
                 },
                 emptyMap(),
+                maxOutputToken = maxOutputToken,
             )
             try {
                 // Do not close the response channel in onDone: publish the final KV
@@ -1506,10 +1528,10 @@ class LiteRtRuntime(
     /**
      * Tear down the currently loaded engine + conversation, if any.
      */
-    suspend fun closeIfLoaded() {
-        idleTeardownJob?.cancel()
-        idleTeardownJob = null
+    suspend fun closeIfLoaded() = generationMutex.withLock {
         mutex.withLock {
+            idleTeardownJob?.cancel()
+            idleTeardownJob = null
             try { loaded?.conversation?.close() } catch (_: Throwable) {}
             try { loaded?.engine?.close() } catch (_: Throwable) {}
             try { preloaded?.engine?.close() } catch (_: Throwable) {}
