@@ -45,11 +45,13 @@ import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.ChatRequestFactory
 import me.rerere.rikkahub.data.ai.ChatTurnContext
+import me.rerere.rikkahub.data.ai.completedStepsInUserTurn
 import me.rerere.rikkahub.data.ai.ConversationMetaGenerator
 import me.rerere.rikkahub.data.ai.MemoryConsolidationScheduler
 import me.rerere.rikkahub.data.ai.TranslationHandler
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.prompts.buildCompressPrompt
+import me.rerere.rikkahub.data.ai.prompts.buildLocalCompressPrompt
 import me.rerere.rikkahub.data.ai.tools.InvalidMcpServerNamesException
 import me.rerere.rikkahub.data.ai.tools.shouldUseExternalWebSearch
 import me.rerere.rikkahub.data.datastore.SettingsStore
@@ -742,6 +744,12 @@ class ChatService(
                         turn = turn,
                         messages = target.history,
                         processingStatus = session.processingStatus,
+                        initialSteps = completedStepsInUserTurn(
+                            target.history,
+                            continuing = target.history.lastOrNull()?.let {
+                                it.role == MessageRole.ASSISTANT || it.isContextCheckpoint
+                            } == true,
+                        ),
                         takePendingParts = session.inbox::takeNotices,
                         preferContextCompression = regenerateNodeId == null &&
                             turn.providerSetting is ProviderSetting.LiteRtLocal &&
@@ -1061,8 +1069,9 @@ class ChatService(
 
     private fun reachesAutoCompressThreshold(model: Model, contextTokens: Int?, historyTrimmed: Boolean = false): Boolean {
         val settings = settingsStore.settingsFlow.value
-        if (!settings.enableAutoCompress || model.contextLength <= 0) return false
-        return historyTrimmed || (contextTokens != null && contextTokens >= model.contextLength * settings.autoCompressThreshold)
+        if (!settings.enableAutoCompress) return false
+        return historyTrimmed || (model.contextLength > 0 && contextTokens != null &&
+            contextTokens >= model.contextLength * settings.autoCompressThreshold)
     }
 
     /**
@@ -1169,7 +1178,9 @@ class ChatService(
         val summary = requestFactory.generateCompressionSummary(
             turn = turn,
             messages = conversation.currentMessages.take(endIndex),
-            compressPrompt = buildCompressPrompt(
+            compressPrompt = if (turn.providerSetting is ProviderSetting.LiteRtLocal) {
+                buildLocalCompressPrompt(additionalPrompt, Locale.getDefault().displayName, midTurn)
+            } else buildCompressPrompt(
                 additionalPrompt = additionalPrompt,
                 locale = Locale.getDefault().displayName,
                 midTurn = midTurn,

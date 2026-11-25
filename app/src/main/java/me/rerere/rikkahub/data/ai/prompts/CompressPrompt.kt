@@ -59,3 +59,12 @@ internal fun buildCompressPrompt(
         appendLine("Additional instructions from user: $additionalPrompt")
     }
 }.trimEnd()
+
+/** Compact instruction for small on-device models. Do not impose the cloud seven-section format. */
+internal fun buildLocalCompressPrompt(additionalPrompt: String, locale: String, midTurn: Boolean): String = buildString {
+    append("Summarize the conversation, including previous summaries, in its language (fallback: $locale). ")
+    append("Keep user goals, facts, constraints, decisions, exact names, numbers, useful tool results and unfinished tasks. ")
+    append("Do not answer the transcript or call tools. Output only a concise summary.")
+    if (midTurn) append(" Preserve completed work and the next action so it can resume without repeating tools.")
+    if (additionalPrompt.isNotBlank()) append("\nAdditional instructions: $additionalPrompt")
+}

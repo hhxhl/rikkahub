@@ -62,7 +62,9 @@ internal class AgentLoop(
             } else if (current != null && steps > 0) {
                 return finish(AgentFinishReason.Completed)
             }
-            if (steps == request.maxSteps) return finish(AgentFinishReason.StepLimitReached)
+            if (steps >= (request.maxSteps - request.initialSteps).coerceAtLeast(0)) {
+                return finish(AgentFinishReason.StepLimitReached)
+            }
             // 只在刚执行完工具时问：接着一条已经执行完的消息继续时不问，否则暂停之后再运行又会立刻暂停
             if (toolsExecuted && !checkNotNull(message).hasTrailingRemoteApprovalDecision() && hooks.shouldPause(checkNotNull(message))) return finish(AgentFinishReason.Paused)
             generateStep()
@@ -263,7 +265,10 @@ internal class AgentLoop(
     }
 
     private suspend fun finish(reason: AgentFinishReason) {
-        events.emit(AgentEvent.Finished(checkNotNull(message), reason))
+        // Compression can leave a checkpoint as the last historical node.
+        val finalMessage = message ?: history.lastOrNull { it.role == MessageRole.ASSISTANT }
+            ?: UIMessage(role = MessageRole.ASSISTANT, parts = emptyList())
+        events.emit(AgentEvent.Finished(finalMessage, reason))
     }
 }
 

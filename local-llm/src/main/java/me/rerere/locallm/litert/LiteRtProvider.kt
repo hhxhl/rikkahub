@@ -143,6 +143,19 @@ class LiteRtProvider(
         )
     }
 
+    /** The same resolved capacity used for Engine allocation, not Model.contextLength. */
+    suspend fun contextCapacity(modelId: String): Int {
+        val path = prefs.installedModels(LocalRuntime.LiteRT)[modelId]
+            ?: error("Model $modelId not installed")
+        val file = java.io.File(path)
+        require(file.isFile) { "Model file is unavailable" }
+        val config = LiteRtModelMetadata.runtimeConfig(file, modelId)
+        return configuredContextTokens(
+            config, LiteRtModelFile.resolveContextCeiling(file, modelId, config),
+            prefs.maxNumTokensOverride(LocalRuntime.LiteRT),
+        )
+    }
+
     override suspend fun listModels(providerSetting: ProviderSetting.LiteRtLocal): List<Model> {
         val installed = prefs.installedModels(LocalRuntime.LiteRT)
         return installed.mapNotNull { (fileName, path) ->
