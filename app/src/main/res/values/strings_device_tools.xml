@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="device_volume_title">Volume control</string>
+    <string name="device_volume_desc">Query or adjust volume</string>
+    <string name="device_brightness_title">Brightness control</string>
+    <string name="device_brightness_desc">Query or adjust screen brightness</string>
+    <string name="device_torch_title">Flashlight</string>
+    <string name="device_torch_desc">Turn flashlight on or off</string>
+    <string name="device_battery_title">Battery information</string>
+    <string name="device_battery_desc">Query battery and charging status</string>
+    <string name="device_audio_info_title">Audio devices</string>
+    <string name="device_audio_info_desc">Query audio output devices</string>
+    <string name="device_wifi_info_title">Wi-Fi information</string>
+    <string name="device_wifi_info_desc">Query wireless network status</string>
+    <string name="device_telephony_info_title">Mobile network information</string>
+    <string name="device_telephony_info_desc">Query mobile network status</string>
+</resources>

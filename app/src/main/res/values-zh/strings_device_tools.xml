@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="device_volume_title">音量控制</string>
+    <string name="device_volume_desc">查询或调整音量</string>
+    <string name="device_brightness_title">亮度控制</string>
+    <string name="device_brightness_desc">查询或调整屏幕亮度</string>
+    <string name="device_torch_title">手电筒</string>
+    <string name="device_torch_desc">开启或关闭手电筒</string>
+    <string name="device_battery_title">电池信息</string>
+    <string name="device_battery_desc">查询电量及充电状态</string>
+    <string name="device_audio_info_title">音频设备信息</string>
+    <string name="device_audio_info_desc">查询音频输出设备</string>
+    <string name="device_wifi_info_title">Wi-Fi 信息</string>
+    <string name="device_wifi_info_desc">查询无线网络状态</string>
+    <string name="device_telephony_info_title">移动网络信息</string>
+    <string name="device_telephony_info_desc">查询移动网络状态</string>
+</resources>

@@ -38,6 +38,34 @@ sealed class LocalToolOption {
     data object ChartDisplay : LocalToolOption()
 
     @Serializable
+    @SerialName("device_volume")
+    data object DeviceVolume : LocalToolOption()
+
+    @Serializable
+    @SerialName("device_brightness")
+    data object DeviceBrightness : LocalToolOption()
+
+    @Serializable
+    @SerialName("device_torch")
+    data object DeviceTorch : LocalToolOption()
+
+    @Serializable
+    @SerialName("device_battery")
+    data object DeviceBattery : LocalToolOption()
+
+    @Serializable
+    @SerialName("device_audio_info")
+    data object DeviceAudioInfo : LocalToolOption()
+
+    @Serializable
+    @SerialName("device_wifi_info")
+    data object DeviceWifiInfo : LocalToolOption()
+
+    @Serializable
+    @SerialName("device_telephony_info")
+    data object DeviceTelephonyInfo : LocalToolOption()
+
+    @Serializable
     @SerialName("phone_use")
     data object PhoneUse : LocalToolOption()
 }

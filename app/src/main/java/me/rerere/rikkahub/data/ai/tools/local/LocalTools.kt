@@ -36,6 +36,14 @@ class LocalTools(
 
     val chartDisplayTool by lazy { buildChartDisplayTool() }
 
+    private val deviceVolumeTool by lazy { buildDeviceTool(context, "volume") }
+    private val deviceBrightnessTool by lazy { buildDeviceTool(context, "brightness") }
+    private val deviceTorchTool by lazy { buildDeviceTool(context, "torch") }
+    private val deviceBatteryTool by lazy { buildDeviceTool(context, "battery") }
+    private val deviceAudioInfoTool by lazy { buildDeviceTool(context, "audio_info") }
+    private val deviceWifiInfoTool by lazy { buildDeviceTool(context, "wifi_info") }
+    private val deviceTelephonyInfoTool by lazy { buildDeviceTool(context, "telephony_info") }
+
     val phoneUseTool by lazy {
         buildPhoneUseTool(
             ownPackageName = context.packageName,
@@ -79,6 +87,13 @@ class LocalTools(
         if (options.contains(LocalToolOption.ChartDisplay)) {
             tools.add(chartDisplayTool)
         }
+        if (options.contains(LocalToolOption.DeviceVolume)) tools.add(deviceVolumeTool)
+        if (options.contains(LocalToolOption.DeviceBrightness)) tools.add(deviceBrightnessTool)
+        if (options.contains(LocalToolOption.DeviceTorch)) tools.add(deviceTorchTool)
+        if (options.contains(LocalToolOption.DeviceBattery)) tools.add(deviceBatteryTool)
+        if (options.contains(LocalToolOption.DeviceAudioInfo)) tools.add(deviceAudioInfoTool)
+        if (options.contains(LocalToolOption.DeviceWifiInfo)) tools.add(deviceWifiInfoTool)
+        if (options.contains(LocalToolOption.DeviceTelephonyInfo)) tools.add(deviceTelephonyInfoTool)
         // 不支持的渠道和系统版本上，之前在别处开过（比如导入的备份）也不提供
         if (options.contains(LocalToolOption.PhoneUse) && PhoneUseManager.isSupported) {
             tools.add(phoneUseTool)

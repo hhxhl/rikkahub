@@ -278,6 +278,48 @@ private fun AssistantLocalToolContent(
                 title = R.string.assistant_page_local_tools_chart_display_title,
                 description = R.string.assistant_page_local_tools_chart_display_desc,
             )
+            toolItem(
+                option = LocalToolOption.DeviceVolume,
+                icon = HugeIcons.VolumeHigh,
+                title = R.string.device_volume_title,
+                description = R.string.device_volume_desc,
+            )
+            toolItem(
+                option = LocalToolOption.DeviceBrightness,
+                icon = HugeIcons.SmartPhone01,
+                title = R.string.device_brightness_title,
+                description = R.string.device_brightness_desc,
+            )
+            toolItem(
+                option = LocalToolOption.DeviceTorch,
+                icon = HugeIcons.SmartPhone01,
+                title = R.string.device_torch_title,
+                description = R.string.device_torch_desc,
+            )
+            toolItem(
+                option = LocalToolOption.DeviceBattery,
+                icon = HugeIcons.SmartPhone01,
+                title = R.string.device_battery_title,
+                description = R.string.device_battery_desc,
+            )
+            toolItem(
+                option = LocalToolOption.DeviceAudioInfo,
+                icon = HugeIcons.VolumeHigh,
+                title = R.string.device_audio_info_title,
+                description = R.string.device_audio_info_desc,
+            )
+            toolItem(
+                option = LocalToolOption.DeviceWifiInfo,
+                icon = HugeIcons.SmartPhone01,
+                title = R.string.device_wifi_info_title,
+                description = R.string.device_wifi_info_desc,
+            )
+            toolItem(
+                option = LocalToolOption.DeviceTelephonyInfo,
+                icon = HugeIcons.SmartPhone01,
+                title = R.string.device_telephony_info_title,
+                description = R.string.device_telephony_info_desc,
+            )
             // 只有 github 渠道的 Android 11 及以上才有
             if (PhoneUseManager.isSupported) {
                 toolItem(
