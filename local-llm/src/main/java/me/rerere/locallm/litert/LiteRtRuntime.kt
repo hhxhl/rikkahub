@@ -52,6 +52,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import me.rerere.locallm.LocalRuntime
@@ -64,11 +65,14 @@ const val ROLE_ASSISTANT = "assistant"
 
 /**
  * Stable, content-derived signature for one conversation turn. Used to decide whether the
- * warm [Conversation]'s KV cache can be reused (see [planTurns]). Length + hashCode keeps
- * the collision rate negligible; a collision would only cause a (correct) cold reload, never
- * wrong output.
+ * warm [Conversation]'s KV cache can be reused (see [planTurns]). A content digest
+ * prevents ordinary String.hashCode collisions from accepting stale KV state.
  */
-fun turnSignature(role: String, text: String): String = "$role|${text.length}|${text.hashCode()}"
+private fun contentDigest(text: String): String =
+    MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+fun turnSignature(role: String, text: String): String = "$role|${text.length}|${contentDigest(text)}"
 
 /**
  * One rendered conversation turn handed from [LiteRtProvider] to [LiteRtRuntime].
@@ -95,8 +99,18 @@ data class Turn(
 ) {
     val signature: String get() = buildString {
         append(turnSignature(role, rawText))
-        images.forEach { append("|image:${it.url.length}:${it.url.hashCode()}") }
-        audio.forEach { append("|audio:${it.url.length}:${it.url.hashCode()}") }
+        images.forEach { append("|image:${contentDigest(it.url)}") }
+        audio.forEach { append("|audio:${contentDigest(it.url)}") }
+        if (nativeParts.any { it is NativeReplayPart.Tool }) {
+            append("|structured:${contentDigest(nativeParts.joinToString(separator = "") { part ->
+                when (part) {
+                    is NativeReplayPart.Text -> "text:${part.text.length}:${part.text}"
+                    is NativeReplayPart.Tool -> listOf(part.name, part.argumentsJson, part.output).joinToString(separator = "") {
+                        if (it == null) "-1:" else "${it.length}:$it"
+                    }.let { "tool:$it" }
+                }
+            })}")
+        }
     }
 }
 
@@ -295,9 +309,8 @@ internal fun nativeToolResponseMessage(results: List<RuntimeToolResult>): Messag
  * surfaced rather than run here so the host can apply approval and the HARDLINE floor.
  */
 sealed interface StreamEvent {
-    /** The **cumulative** response assembled from SDK message chunks, not a delta.
-     *  Downstream computes deltas itself. */
-    data class Delta(val cumulative: String) : StreamEvent
+    /** The SDK's incremental text chunk. The runtime keeps its own complete reply for KV matching. */
+    data class Delta(val text: String) : StreamEvent
 
     data class ThinkingDelta(val text: String) : StreamEvent
 
@@ -445,7 +458,26 @@ class LiteRtRuntime(
 
     /** Reserve the full provider request, including the Engine-to-stream handoff. */
     suspend fun <T> withGenerationReservation(block: suspend () -> T): T = generationMutex.withLock { block() }
-    private var loaded: LoadedModel? = null
+    @Volatile private var loaded: LoadedModel? = null
+
+    /** A native task whose cancellation was not acknowledged. Never reuse or close
+     * its objects until its terminal callback has arrived, including on preload/idle. */
+    private fun retireQuarantinedLocked(): Boolean {
+        val instance = loaded ?: return true
+        val completion = instance.unacknowledgedStop ?: return true
+        if (!completion.isCompleted) return false
+        try { instance.conversation.close() } catch (_: Throwable) {}
+        try { instance.engine.close() } catch (_: Throwable) {}
+        loaded = null
+        publishBackendStatus()
+        return true
+    }
+
+    private fun requireSafeEngineLocked() {
+        check(retireQuarantinedLocked()) {
+            "LiteRT is still stopping the previous native generation. Retry after it finishes; restart the app if it remains stuck."
+        }
+    }
 
     /** Engine-only prefetch; no Conversation/KV state until a real request arrives. */
     private var preloaded: PreloadedEngine? = null
@@ -503,6 +535,7 @@ class LiteRtRuntime(
         idleTeardownJob = idleScope.launch {
             kotlinx.coroutines.delay(delay)
             mutex.withLock {
+                if (!retireQuarantinedLocked()) return@withLock
                 val now = android.os.SystemClock.elapsedRealtime()
                 loaded?.let { current ->
                     if (current.pendingStreamOwner == null && now - current.lastUseAtMs >= delay) {
@@ -537,6 +570,8 @@ class LiteRtRuntime(
          *  field. "gpu" / "cpu" / "npu". Default "gpu" matches Gallery's default; null
          *  is reserved for non-multimodal models where supportImage is also false. */
         val visionAccelerator: String,
+        val fileSize: Long = File(modelPath).length(),
+        val fileModified: Long = File(modelPath).lastModified(),
     )
 
     /**
@@ -597,6 +632,7 @@ class LiteRtRuntime(
         /** Set after ensureLoaded until streamTurns begins: protects that gap from a
          *  model-selection preload closing the Engine before its actual request starts. */
         var pendingStreamOwner: String? = null,
+        var unacknowledgedStop: CompletableDeferred<Throwable?>? = null,
         /** Monotonic timestamp of the last [streamTurns] invocation. The idle-teardown
          *  watchdog ([armIdleTeardown]) uses this to decide whether to close the engine. */
         @Volatile var lastUseAtMs: Long = android.os.SystemClock.elapsedRealtime(),
@@ -630,6 +666,7 @@ class LiteRtRuntime(
         supportAudio: Boolean = false,
         visionAccelerator: String = "gpu",
     ): PreloadResult = mutex.withLock {
+        if (!retireQuarantinedLocked()) return@withLock PreloadResult.DEFERRED
         require(preferredAccel in setOf("CPU", "GPU", "NPU")) {
             "Unsupported LiteRT backend: $preferredAccel"
         }
@@ -790,6 +827,7 @@ class LiteRtRuntime(
         /** Current user-ending history; initialMessages are used only for a new Conversation. */
         initialTurnHistory: List<Turn> = emptyList(),
     ): LoadOutcome = mutex.withLock {
+        requireSafeEngineLocked()
         require(preferredAccel in setOf("CPU", "GPU", "NPU")) {
             "Unsupported LiteRT backend: $preferredAccel"
         }
@@ -1200,8 +1238,8 @@ class LiteRtRuntime(
      *    role-bearing initialMessages when the last turn is USER. [coldBlob] remains
      *    the compatibility path for unmatched tool continuations ending ASSISTANT.
      *
-     * Each emitted String is the **cumulative** response so far, NOT a delta — same contract
-     * as Gallery's `partialResult`. Downstream consumers compute deltas themselves.
+     * Text events carry incremental SDK chunks; the runtime retains the complete reply
+     * only for history reconciliation.
      *
      * Caller MUST have called [ensureLoaded] first. The [mutex] is held for the whole
      * inference so two concurrent callers queue up rather than racing the Conversation.
@@ -1244,6 +1282,7 @@ class LiteRtRuntime(
         }
 
         try { mutex.withLock {
+            requireSafeEngineLocked()
             val instance = loaded
                 ?: throw IllegalStateException("Call ensureLoaded(...) before streamTurns()")
 
@@ -1289,7 +1328,13 @@ class LiteRtRuntime(
             val coldToolReplay = if (nativeToolResults == null && !hasMedia && toolResults.isNotEmpty()) {
                 nativeColdToolContinuation(history, ::nativeUserMessage)
             } else null
-            val planned = planTurns(instance.processed, historySignatures, hasMedia)
+            // External attachment URIs may be mutable; never trust a cached prefix
+            // containing them solely because its URL is unchanged.
+            val mutableMedia = history.any { turn ->
+                turn.images.any { !it.url.startsWith("data:", ignoreCase = true) } ||
+                    turn.audio.any { !it.url.startsWith("data:", ignoreCase = true) }
+            }
+            val planned = planTurns(instance.processed, historySignatures, hasMedia || mutableMedia)
             // Only a newly appended USER can be submitted as a user message.
             val plan = if (planned is TurnPlan.Warm &&
                 history[planned.sendFromIndex].role != ROLE_USER
@@ -1372,6 +1417,7 @@ class LiteRtRuntime(
             // From this point onward native state may have changed, even if a send
             // throws or the user cancels before the first token arrives.
             instance.pristineConversation = false
+            try {
             conv.sendMessageAsync(
                 inputMessage,
                 object : MessageCallback {
@@ -1385,7 +1431,7 @@ class LiteRtRuntime(
                         val text = message.toString()
                         if (text.isNotEmpty()) {
                             responseBuilder.append(text)
-                            trySendBlocking(StreamEvent.Delta(responseBuilder.toString()))
+                            trySendBlocking(StreamEvent.Delta(text))
                         }
                         val calls = message.toolCalls
                         if (calls.size > emittedToolCalls) {
@@ -1451,6 +1497,14 @@ class LiteRtRuntime(
                 emptyMap(),
                 maxOutputToken = maxOutputToken,
             )
+            } catch (t: Throwable) {
+                // A synchronous SDK submission error has no successful generation to reuse.
+                instance.processed.clear()
+                instance.pendingToolBatch = null
+                instance.completedToolTurn = null
+                instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
+                throw t
+            }
             try {
                 // Do not close the response channel in onDone: publish the final KV
                 // snapshot from this coroutine, outside the native callback thread.
@@ -1466,7 +1520,7 @@ class LiteRtRuntime(
                         )
                         send(StreamEvent.ContextTokens(count))
                     }
-                } else if (error !is CancellationException) {
+                } else {
                     throw error
                 }
             } finally {
@@ -1477,9 +1531,6 @@ class LiteRtRuntime(
                     android.util.Log.i("LiteRtRuntime", "stream cancelled; request native stop")
                     runCatching { conv.cancelProcess() }
                         .onFailure { android.util.Log.w("LiteRtRuntime", "cancelProcess failed", it) }
-                    instance.processed.clear()
-                    instance.pendingToolBatch = null
-                    instance.completedToolTurn = null
                 }
                 if (cancellationRequested.get()) {
                     withContext(NonCancellable) {
@@ -1490,10 +1541,22 @@ class LiteRtRuntime(
                         if (!acknowledged) {
                             android.util.Log.w(
                                 "LiteRtRuntime",
-                                "native cancellation not acknowledged within 1500ms; next turn must rebuild",
+                                "native cancellation not acknowledged within 1500ms; quarantining Engine",
                             )
+                            instance.unacknowledgedStop = nativeFinished
+                            idleScope.launch {
+                                nativeFinished.await()
+                                mutex.withLock {
+                                    if (loaded === instance) retireQuarantinedLocked()
+                                }
+                            }
                         }
                     }
+                    // A late callback may have raced cancellation. Invalidate its state
+                    // after acknowledgement; a quarantined instance will never be reused.
+                    instance.processed.clear()
+                    instance.pendingToolBatch = null
+                    instance.completedToolTurn = null
                 }
             }
         } } finally {
@@ -1527,6 +1590,7 @@ class LiteRtRuntime(
     ): T {
         mutex.lock()
         try {
+            requireSafeEngineLocked()
             // ensureLoaded -> streamTurns is a two-call handoff. Do not take its
             // engine away in that gap even though the mutex is briefly unlocked.
             check(loaded?.pendingStreamOwner == null) {
@@ -1553,6 +1617,7 @@ class LiteRtRuntime(
      */
     suspend fun closeIfLoaded() = generationMutex.withLock {
         mutex.withLock {
+            requireSafeEngineLocked()
             idleTeardownJob?.cancel()
             idleTeardownJob = null
             try { loaded?.conversation?.close() } catch (_: Throwable) {}

@@ -434,32 +434,18 @@ class LiteRtProvider(
         // Box-style: do not persist the resolved backend or an implicit fallback.
         // The user's per-model backend preference is the only source of truth.
 
-        // ---- Stream + cumulative→delta conversion ----
-        //
-        // The runtime accumulates the SDK's onMessage chunks and emits the
-        // CUMULATIVE response so far. But
-        // RikkaHub's downstream chunk-handling APPENDS each Text part (see
-        // UIMessage.appendChunk in ai/ui/Message.kt: incoming Text parts are concatenated
-        // onto the previous Text part). Emitting cumulative chunks straight through would
-        // duplicate the response geometrically. So we hold the previous cumulative and
-        // emit only the new suffix as the delta.
-        //
-        // We also collect the full cumulative response so we can extract tool-call blocks
-        // at end-of-stream (see the comment block right after the collect{} below for why
-        // we do this once at the end rather than incrementally like AICoreProvider does).
+        // SDK text chunks are already deltas. Forward them without cumulative copies.
         val streamId = "litert-${System.currentTimeMillis()}"
         // One stable id for the whole turn's prose (the vision-dropped note, if any, plus
         // every generation delta) so StreamChunkHandler appends them into a single Text part,
         // matching the old positional-append merge behaviour.
         val textId = "$streamId-text"
-        var previousCumulative = ""
         var reasoningSequence = 0
         var activeReasoningId: String? = null
         suspend fun endReasoning() {
             activeReasoningId?.let { emit(StreamChunk.ReasoningEnd(it)) }
             activeReasoningId = null
         }
-        val fullResponseBuilder = StringBuilder()
 
         // Extract images + audio from the LAST USER message only (the new turn). Earlier
         // turns' media is already represented in the conversation prefix via the cold-blob
@@ -538,24 +524,9 @@ class LiteRtProvider(
                             emit(StreamChunk.ReasoningDelta(id, event.text))
                         }
                         is StreamEvent.Delta -> {
-                            val cumulative = event.cumulative
-                            // Defensive: if the SDK ever emits a non-monotonic cumulative (e.g.
-                            // after an internal retry or template re-tokenisation), treat the new
-                            // payload as a fresh start, emitting it whole as the delta rather than
-                            // computing a negative-length suffix that would silently drop
-                            // characters.
-                            val delta = if (cumulative.startsWith(previousCumulative)) {
-                                cumulative.substring(previousCumulative.length)
-                            } else {
-                                cumulative
-                            }
-                            previousCumulative = cumulative
-                            fullResponseBuilder.setLength(0)
-                            fullResponseBuilder.append(cumulative)
-
-                            if (delta.isNotEmpty()) {
+                            if (event.text.isNotEmpty()) {
                                 endReasoning()
-                                emit(StreamChunk.TextDelta(textId, delta))
+                                emit(StreamChunk.TextDelta(textId, event.text))
                             }
                         }
 

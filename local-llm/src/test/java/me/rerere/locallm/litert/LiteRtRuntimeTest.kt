@@ -143,6 +143,12 @@ class LiteRtRuntimeTest {
     }
 
     @Test
+    fun `turnSignature rejects equal length Java hash collisions`() {
+        assertEquals("Aa".hashCode(), "BB".hashCode())
+        assertFalse(turnSignature(ROLE_USER, "Aa") == turnSignature(ROLE_USER, "BB"))
+    }
+
+    @Test
     fun `turnSignature differs when content differs`() {
         assertFalse(turnSignature(ROLE_USER, "a") == turnSignature(ROLE_USER, "b"))
     }
