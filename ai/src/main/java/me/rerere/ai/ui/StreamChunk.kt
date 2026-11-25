@@ -162,5 +162,6 @@ sealed class StreamChunk {
         val model: String? = null,
         // Actual occupied context, separate from cumulative input/output accounting.
         val contextTokenCount: Int? = null,
+        val contextHistoryTrimmed: Boolean = false,
     ) : StreamChunk()
 }

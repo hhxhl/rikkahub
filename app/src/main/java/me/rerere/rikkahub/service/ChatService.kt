@@ -69,6 +69,7 @@ import me.rerere.rikkahub.data.model.getStoredAssistantOf
 import me.rerere.rikkahub.data.model.insertContextCheckpoint
 import me.rerere.rikkahub.data.model.isAwaitingToolApproval
 import me.rerere.rikkahub.data.model.lastContextTokens
+import me.rerere.rikkahub.data.model.lastContextHistoryTrimmed
 import me.rerere.rikkahub.data.model.localFileUrls
 import me.rerere.rikkahub.data.model.replaceUserRegexes
 import me.rerere.rikkahub.data.model.selectBranch
@@ -740,7 +741,7 @@ class ChatService(
                             if (!canCompress || compressionUseless) return@pause false
                             // 同一条回复只试一次，压缩失败后接着它写时不再重试
                             if (message.id == session.autoCompressedReplyId) return@pause false
-                            if (!reachesAutoCompressThreshold(turn.model, message.contextTokens())) return@pause false
+                            if (!reachesAutoCompressThreshold(turn.model, message.contextTokens(), message.contextHistoryTrimmed)) return@pause false
                             if (freshReply && (message.stepCount ?: 0) <= 1) {
                                 compressionUseless = true
                                 return@pause false
@@ -985,7 +986,7 @@ class ChatService(
             if (reply.id == session.autoCompressedReplyId) return null
             // 已经压缩过的话检查点在回复之后，这里取到的是 null
             val model = settings.getChatModelOf(conversation) ?: return null
-            if (!reachesAutoCompressThreshold(model, conversation.lastContextTokens())) return null
+            if (!reachesAutoCompressThreshold(model, conversation.lastContextTokens(), conversation.lastContextHistoryTrimmed())) return null
 
             session.autoCompressedReplyId = reply.id
             return launchCompressionJob(
@@ -1039,10 +1040,10 @@ class ChatService(
         return job
     }
 
-    private fun reachesAutoCompressThreshold(model: Model, contextTokens: Int?): Boolean {
+    private fun reachesAutoCompressThreshold(model: Model, contextTokens: Int?, historyTrimmed: Boolean = false): Boolean {
         val settings = settingsStore.settingsFlow.value
-        if (!settings.enableAutoCompress || contextTokens == null || model.contextLength <= 0) return false
-        return contextTokens >= model.contextLength * settings.autoCompressThreshold
+        if (!settings.enableAutoCompress || model.contextLength <= 0) return false
+        return historyTrimmed || (contextTokens != null && contextTokens >= model.contextLength * settings.autoCompressThreshold)
     }
 
     /**

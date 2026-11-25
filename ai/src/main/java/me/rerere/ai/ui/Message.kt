@@ -41,6 +41,7 @@ data class UIMessage(
     val isSynthetic: Boolean = false,
     // Provider-reported context occupancy after the latest request (not cumulative usage).
     val contextTokenCount: Int? = null,
+    val contextHistoryTrimmed: Boolean = false,
 ) {
     fun summaryAsText(maxLength: Int = Int.MAX_VALUE): String {
         val text = "[${role.name}]: " + parts.joinToString(separator = "\n") { part ->

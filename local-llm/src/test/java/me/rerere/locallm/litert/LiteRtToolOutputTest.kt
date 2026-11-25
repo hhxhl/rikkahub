@@ -34,6 +34,23 @@ class LiteRtToolOutputTest {
     }
 
     @Test
+    fun `generic tool output respects UTF8 budget without corrupting emoji`() {
+        val raw = "中文😀".repeat(1000)
+        val output = compactLocalToolOutput("scrape_web", raw, 512)
+        assertTrue(output.toByteArray(Charsets.UTF_8).size <= 512)
+        assertTrue(output.endsWith("[Tool output shortened for local context]"))
+        assertEquals("中", utf8Prefix("中文😀", 4))
+    }
+
+    @Test
+    fun `search budget preserves valid JSON`() {
+        val original = """{"items":[{"id":"abc","url":"https://example.org","title":"Title","text":"${"x".repeat(500)}"}]}"""
+        val output = compactLocalToolOutput("search_web", original, 180)
+        assertTrue(output.toByteArray(Charsets.UTF_8).size <= 180)
+        Json.parseToJsonElement(output).jsonObject
+    }
+
+    @Test
     fun `malformed search output is safely bounded`() {
         val raw = "invalid".repeat(900)
         assertEquals(500, compactLocalToolOutput("search_web", raw).length)

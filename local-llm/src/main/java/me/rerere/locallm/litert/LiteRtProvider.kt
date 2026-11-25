@@ -26,6 +26,9 @@ import com.google.ai.edge.litertlm.ThinkingConfig
 
 private const val TAG = "LiteRtProvider"
 
+/** A local prompt did not fit; compression may retry with smaller complete batches. */
+class LocalContextBudgetException(message: String, cause: Throwable? = null) : IllegalArgumentException(message, cause)
+
 /**
  * Map RikkaHub's existing reasoning picker to the LiteRT-LM 0.19.1 native API.
  * AUTO inherits the model's default instead of forcing thinking on or off.
@@ -316,13 +319,16 @@ class LiteRtProvider(
             it.role != MessageRole.SYSTEM && it.role != MessageRole.TOOL
         }
         val untrimmedTurnCount = trimmed.size
-        var coldBlob = renderColdBlob(trimmed)
         val historyBudget = historyByteBudget(contextTokens, systemBytes, toolBytesUsed, reservePercent)
+        var coldBlob = renderColdBlob(trimmed, historyBudget)
         while (coldBlob.toByteArray(Charsets.UTF_8).size > historyBudget && trimmed.size > 1) {
-            val next = trimOldestConversationSegment(trimmed) { it.role == MessageRole.USER }
-            if (next.size == trimmed.size) break  // no complete segment can be removed safely
-            trimmed = next
-            coldBlob = renderColdBlob(trimmed)
+            // Keep the existing summary; dropping it would forget all earlier turns.
+            val checkpoint = trimmed.firstOrNull()?.takeIf { it.isContextCheckpoint }
+            val tail = if (checkpoint == null) trimmed else trimmed.drop(1)
+            val next = trimOldestConversationSegment(tail) { it.role == MessageRole.USER }
+            if (next.size == tail.size) break
+            trimmed = if (checkpoint == null) next else listOf(checkpoint) + next
+            coldBlob = renderColdBlob(trimmed, historyBudget)
         }
         if (trimmed.size != untrimmedTurnCount) {
             Log.i(TAG, "history trimmed: $untrimmedTurnCount -> ${trimmed.size} turns; " +
@@ -330,13 +336,13 @@ class LiteRtProvider(
         }
         val historyBytes = coldBlob.toByteArray(Charsets.UTF_8).size
         if (historyBytes > historyBudget) {
-            throw IllegalArgumentException(
-                "Latest message exceeds the safe local context budget ($historyBytes > " +
+            throw LocalContextBudgetException(
+                "Latest message or retained summary exceeds the safe local context budget ($historyBytes > " +
                     "$historyBudget UTF-8 bytes for ${contextTokens} tokens). " +
                     "Shorten the message, reduce enabled tools, or use a larger context model."
             )
         }
-        val turns = trimmed.map { it.toTurn() }
+        val turns = trimmed.map { it.toTurn(historyBudget) }
         // The final ASSISTANT message contains the host's executed tool parts.
         // Preserve call ids and arguments for exact matching against SDK tool calls.
         // Earlier tool parts in the same assistant turn are harmless: the runtime only
@@ -352,7 +358,7 @@ class LiteRtProvider(
                     id = part.toolCallId,
                     name = part.toolName,
                     argumentsJson = part.input.ifBlank { "{}" },
-                    output = compactLocalToolOutput(part.toolName, rawText),
+                    output = compactLocalToolOutput(part.toolName, rawText, toolOutputByteLimit(trimmed.last(), historyBudget)),
                 )
             }.orEmpty()
 
@@ -579,6 +585,7 @@ class LiteRtProvider(
         emit(StreamChunk.Finish(
             finishReason = if (toolCallCount > 0) "tool_calls" else "stop",
             contextTokenCount = contextTokenCount,
+            contextHistoryTrimmed = trimmed.size != untrimmedTurnCount,
         ))
         } finally {
             // Cancellation must also release the ensureLoaded→streamTurns reservation.
@@ -598,7 +605,10 @@ class LiteRtProvider(
      * `<tool_call>…</tool_call>` / `<tool_result>…</tool_result>` shape the prompt prefix
      * teaches the model, preserving prompt-engineered tool-calling continuity across turns.
      */
-    private fun renderTurnRawText(msg: UIMessage): String = buildString {
+    private fun toolOutputByteLimit(message: UIMessage, historyBudget: Int): Int =
+        (historyBudget / 2 / maxOf(1, message.getTools().count { it.isExecuted })).coerceAtLeast(1)
+
+    private fun renderTurnRawText(msg: UIMessage, historyBudget: Int): String = buildString {
         when (msg.role) {
             MessageRole.USER -> {
                 append(
@@ -621,7 +631,7 @@ class LiteRtProvider(
                                     .joinToString("") { it.text }
                                 if (outText.isNotEmpty()) {
                                     append("\n<tool_result>")
-                                        .append(compactLocalToolOutput(part.toolName, outText))
+                                        .append(compactLocalToolOutput(part.toolName, outText, toolOutputByteLimit(msg, historyBudget)))
                                         .append("</tool_result>")
                                 }
                             }
@@ -635,7 +645,7 @@ class LiteRtProvider(
     }
 
     /** Convert a message into a [Turn] for the runtime's warm/cold KV-cache decision. */
-    private fun UIMessage.toTurn(): Turn {
+    private fun UIMessage.toTurn(historyBudget: Int): Turn {
         val turnRole = when (this.role) {
             MessageRole.USER -> ROLE_USER
             MessageRole.ASSISTANT -> ROLE_ASSISTANT
@@ -653,7 +663,7 @@ class LiteRtProvider(
                             name = part.toolName,
                             argumentsJson = part.input.ifBlank { "{}" },
                             output = if (part.isExecuted && outputText.isNotBlank()) {
-                                compactLocalToolOutput(part.toolName, outputText)
+                                compactLocalToolOutput(part.toolName, outputText, toolOutputByteLimit(this, historyBudget))
                             } else null,
                         )
                     }
@@ -661,7 +671,7 @@ class LiteRtProvider(
                 }
             }
         } else emptyList()
-        return Turn(turnRole, renderTurnRawText(this), replayParts)
+        return Turn(turnRole, renderTurnRawText(this, historyBudget), replayParts)
     }
 
     /**
@@ -672,19 +682,19 @@ class LiteRtProvider(
      * native initialMessages + the latest user message. For non-user-ending tool continuations,
      * keep the previous text fallback until native tool-result replay is implemented.
      */
-    private fun renderColdBlob(messages: List<UIMessage>): String =
-        if (messages.size == 1) renderTurnRawText(messages[0])
-        else renderHistoryAsChatML(messages)
+    private fun renderColdBlob(messages: List<UIMessage>, historyBudget: Int): String =
+        if (messages.size == 1) renderTurnRawText(messages[0], historyBudget)
+        else renderHistoryAsChatML(messages, historyBudget)
 
-    private fun renderHistoryAsChatML(messages: List<UIMessage>): String = buildString {
+    private fun renderHistoryAsChatML(messages: List<UIMessage>, historyBudget: Int): String = buildString {
         var first = true
         for (msg in messages) {
             if (msg.role == MessageRole.SYSTEM || msg.role == MessageRole.TOOL) continue
             if (!first) append("\n")
             first = false
             when (msg.role) {
-                MessageRole.USER -> append("User: ").append(renderTurnRawText(msg))
-                MessageRole.ASSISTANT -> append("Assistant: ").append(renderTurnRawText(msg))
+                MessageRole.USER -> append("User: ").append(renderTurnRawText(msg, historyBudget))
+                MessageRole.ASSISTANT -> append("Assistant: ").append(renderTurnRawText(msg, historyBudget))
                 else -> { /* unreachable — filtered above */ }
             }
         }
@@ -727,7 +737,7 @@ class LiteRtProvider(
             (joined.contains("Status Code: 3", ignoreCase = true) && overflow != null)) {
             val (have, limit) = overflow?.let { it.groupValues[1] to it.groupValues[2] }
                 ?: ("?" to effectiveMaxNumTokens.toString())
-            return RuntimeException(
+            return LocalContextBudgetException(
                 "This model can only hold $limit tokens of context, but the conversation " +
                     "needs $have. Tap /new to start a fresh chat, switch to a model with a " +
                     "larger context (e.g. Gemma 4 E2B = 32k), OR raise \"Max context\" in " +

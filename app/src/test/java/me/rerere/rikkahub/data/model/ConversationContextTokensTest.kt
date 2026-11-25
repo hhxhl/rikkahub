@@ -30,6 +30,15 @@ class ConversationContextTokensTest {
     )
 
     @Test
+    fun `history trimming signal is cleared by a subsequent checkpoint`() {
+        val message = assistantMessage(1).copy(contextHistoryTrimmed = true)
+        assertEquals(true, conversation(message).lastContextHistoryTrimmed())
+        assertEquals(false, conversation(message, UIMessage.user("summary").copy(
+            createdAt = at(2), isContextCheckpoint = true,
+        )).lastContextHistoryTrimmed())
+    }
+
+    @Test
     fun `uses provider context snapshot without token accounting`() {
         val message = assistantMessage(1).copy(contextTokenCount = 1800)
         assertEquals(1800, conversation(message).lastContextTokens())

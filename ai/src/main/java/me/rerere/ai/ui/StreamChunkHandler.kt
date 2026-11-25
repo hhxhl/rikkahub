@@ -317,6 +317,7 @@ class StreamChunkHandler(private val model: Model? = null) {
             is StreamChunk.Usage -> copy(usage = usage.merge(chunk.usage))
             is StreamChunk.Finish -> copy(
                 contextTokenCount = chunk.contextTokenCount,
+                contextHistoryTrimmed = chunk.contextHistoryTrimmed,
                 finishedAt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
             ).finishReasoning().also {
                 // Finish 同时结束尚未显式结束的 reasoning，并释放本次响应流的索引状态。
@@ -363,6 +364,7 @@ fun List<UIMessage>.handleTextGenerationResult(
             modelId = model?.id ?: last().modelId,
             usage = last().usage.merge(result.usage ?: TokenUsage()),
             contextTokenCount = incoming.contextTokenCount,
+            contextHistoryTrimmed = incoming.contextHistoryTrimmed,
             finishedAt = incoming.finishedAt,
         ).finishReasoning()
     }

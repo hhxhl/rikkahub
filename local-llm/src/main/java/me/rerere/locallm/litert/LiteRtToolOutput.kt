@@ -17,9 +17,55 @@ import kotlinx.serialization.json.put
  * small local model. Likewise, avoid presenting the entire search API response as a
  * sample answer: a small model may reproduce it instead of answering the user.
  */
-internal fun compactLocalToolOutput(toolName: String, rawOutput: String): String = when (toolName) {
-    "search_web" -> compactLocalSearchOutput(rawOutput)
-    else -> rawOutput
+internal fun compactLocalToolOutput(toolName: String, rawOutput: String, maxBytes: Int = Int.MAX_VALUE): String {
+    val output = if (toolName == "search_web") compactLocalSearchOutput(rawOutput) else rawOutput
+    if (output.toByteArray(Charsets.UTF_8).size <= maxBytes) return output
+    if (toolName == "search_web") {
+        // Keep JSON and genuine citation metadata intact rather than cutting inside a string.
+        val payload = runCatching { Json.parseToJsonElement(output).jsonObject }.getOrNull()
+        if (payload != null) {
+            val items = (payload["items"] as? JsonArray).orEmptyItems()
+            for (count in items.size downTo 0) {
+                val candidate = buildJsonObject {
+                    put("truncated", true)
+                    put("items", JsonArray(items.take(count).mapNotNull { element ->
+                        val item = element as? JsonObject ?: return@mapNotNull null
+                        buildJsonObject {
+                            for (key in listOf("id", "title", "url", "publishedDate")) {
+                                item[key].stringOrNull()?.let { put(key, it) }
+                            }
+                            item["text"].stringOrNull()?.let { put("text", it.take(80)) }
+                        }
+                    }))
+                }.toString()
+                if (candidate.toByteArray(Charsets.UTF_8).size <= maxBytes) return candidate
+            }
+            if (maxBytes >= 2) return "{}"
+        }
+    }
+    val marker = "\n[Tool output shortened for local context]"
+    if (maxBytes <= marker.length) return utf8Prefix(output, maxBytes)
+    return utf8Prefix(output, maxBytes - marker.length) + marker
+}
+
+/** Truncate by UTF-8 bytes without splitting surrogate pairs. */
+internal fun utf8Prefix(text: String, maxBytes: Int): String {
+    if (maxBytes <= 0) return ""
+    var index = 0
+    var used = 0
+    while (index < text.length) {
+        val cp = text.codePointAt(index)
+        val bytes = when {
+            cp <= 0x7f -> 1
+            cp <= 0x7ff -> 2
+            cp <= 0xffff -> 3
+            else -> 4
+        }
+        if (bytes > maxBytes - used) break
+        used += bytes
+        index += Character.charCount(cp)
+    }
+    return text.substring(0, index)
 }
 
 internal fun compactLocalSearchOutput(rawOutput: String): String {
