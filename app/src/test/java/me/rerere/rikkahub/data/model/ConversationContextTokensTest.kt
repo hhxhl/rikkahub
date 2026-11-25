@@ -30,6 +30,16 @@ class ConversationContextTokensTest {
     )
 
     @Test
+    fun `uses provider context snapshot without token accounting`() {
+        val message = assistantMessage(1).copy(contextTokenCount = 1800)
+        assertEquals(1800, conversation(message).lastContextTokens())
+        assertNull(message.usage)
+        assertNull(conversation(message, UIMessage.user("summary").copy(
+            createdAt = at(2), isContextCheckpoint = true,
+        )).lastContextTokens())
+    }
+
+    @Test
     fun `uses the last request of the last reply instead of accumulated usage`() {
         val conversation = conversation(
             UIMessage.user("hi"),

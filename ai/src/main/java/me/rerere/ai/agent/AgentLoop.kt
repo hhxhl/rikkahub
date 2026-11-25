@@ -125,7 +125,7 @@ internal class AgentLoop(
     ): UIMessage {
         // 多轮工具调用共用同一条助手消息，消息上已有的 usage 和耗时来自之前的步骤。
         // 本步从清空的统计开始（merge 只适合同一次请求内的快照），再与之前的步骤累加。
-        val stepStart = base.copy(usage = null, generationTimeMs = null)
+        val stepStart = base.copy(usage = null, generationTimeMs = null, contextTokenCount = null)
         return try {
             withRetry(retryFor(params), onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
                 // 每次重试都从本步开始时的消息重新合并，不会把重试的响应接在已经展示的半截回复后面；
@@ -171,6 +171,7 @@ internal class AgentLoop(
             annotations = result.message.annotations.ifEmpty { base.annotations },
             modelId = params.model.id,
             usage = result.usage,
+            contextTokenCount = result.message.contextTokenCount,
         ).finishReasoning().withStepStats(base, requestTime)
         preview(generated, newPartsFrom = base.parts.size)
         return generated

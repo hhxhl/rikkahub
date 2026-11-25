@@ -39,6 +39,8 @@ data class UIMessage(
     // 请求期间生成的内部消息；该标记仅在内存中使用
     @Transient
     val isSynthetic: Boolean = false,
+    // Provider-reported context occupancy after the latest request (not cumulative usage).
+    val contextTokenCount: Int? = null,
 ) {
     fun summaryAsText(maxLength: Int = Int.MAX_VALUE): String {
         val text = "[${role.name}]: " + parts.joinToString(separator = "\n") { part ->
@@ -96,7 +98,7 @@ data class UIMessage(
     fun lastRequestUsage(): TokenUsage? = lastUsage ?: usage
 
     /** 最后一次请求结束时的上下文占用（prompt + completion） */
-    fun contextTokens(): Int? = lastRequestUsage()?.let { it.promptTokens + it.completionTokens }
+    fun contextTokens(): Int? = contextTokenCount ?: lastRequestUsage()?.let { it.promptTokens + it.completionTokens }
 
     /**
      * 用快照还原出一个只用于展示名称和图标的 [Model]

@@ -16,6 +16,19 @@ class StreamChunkHandlerTest {
     private val model = Model(modelId = "test-model")
 
     @Test
+    fun `context snapshot is independent of usage and replaced on finish`() {
+        val handler = StreamChunkHandler(model)
+        var messages = listOf(UIMessage.user("hello"))
+        messages = handler.handle(messages, StreamChunk.Finish(contextTokenCount = 1800))
+        assertEquals(1800, messages.last().contextTokens())
+        assertEquals(null, messages.last().usage)
+        messages = handler.handle(messages, StreamChunk.Finish(contextTokenCount = 900))
+        assertEquals(900, messages.last().contextTokens())
+        messages = handler.handle(messages, StreamChunk.Finish())
+        assertEquals(null, messages.last().contextTokens())
+    }
+
+    @Test
     fun `text lifecycle should create and update assistant message`() {
         var messages = listOf(UIMessage.user("hello"))
         val handler = StreamChunkHandler(model)

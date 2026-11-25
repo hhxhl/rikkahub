@@ -496,6 +496,7 @@ class LiteRtProvider(
         }
 
         var toolCallCount = 0
+        var contextTokenCount: Int? = null
         run {
             try {
                 runtime.streamTurns(
@@ -528,6 +529,10 @@ class LiteRtProvider(
                             }
                         }
 
+                        is StreamEvent.ContextTokens -> {
+                            contextTokenCount = event.count
+                        }
+
                         is StreamEvent.ToolCalls -> {
                             // IDs are minted by the runtime and retained until RikkaHub
                             // finishes approval/execution. This allows a later native
@@ -556,7 +561,10 @@ class LiteRtProvider(
         // then calls back in with the results. Reporting "tool_calls" is what tells the
         // agent loop to do that; reporting "stop" would end the turn with the model's
         // request silently dropped.
-        emit(StreamChunk.Finish(finishReason = if (toolCallCount > 0) "tool_calls" else "stop"))
+        emit(StreamChunk.Finish(
+            finishReason = if (toolCallCount > 0) "tool_calls" else "stop",
+            contextTokenCount = contextTokenCount,
+        ))
         } finally {
             // Cancellation must also release the ensureLoaded→streamTurns reservation.
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {

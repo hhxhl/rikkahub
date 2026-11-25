@@ -35,12 +35,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
@@ -288,6 +287,9 @@ sealed interface StreamEvent {
 
     /** Tool calls the model emitted this turn, in the order the model produced them. */
     data class ToolCalls(val calls: List<RuntimeToolCall>) : StreamEvent
+
+    /** SDK-reported KV occupancy after a successful generation, never a delta. */
+    data class ContextTokens(val count: Int) : StreamEvent
 }
 
 /**
@@ -1173,7 +1175,7 @@ class LiteRtRuntime(
         images: List<Bitmap> = emptyList(),
         audioClips: List<ByteArray> = emptyList(),
         onThinking: ((String) -> Unit)? = null,
-    ): Flow<StreamEvent> = callbackFlow {
+    ): Flow<StreamEvent> = channelFlow {
         // GPU-boost the inference. Three levers, in order of effectiveness:
         //   1. PerformanceHintManager (API 33+). Opens a hint session for this thread
         //      with a 50ms target — the OS scheduler treats the process as doing
@@ -1317,10 +1319,10 @@ class LiteRtRuntime(
             instance.pendingToolBatch = null
 
             // Set once the SDK reports the generation finished (either way). Read from the
-            // flow's coroutine in awaitClose to tell a natural end from a cancellation.
+            // flow's coroutine to tell a natural end from a cancellation.
             val generationFinished = java.util.concurrent.atomic.AtomicBoolean(false)
             val cancellationRequested = java.util.concurrent.atomic.AtomicBoolean(false)
-            val nativeFinished = CompletableDeferred<Unit>()
+            val nativeFinished = CompletableDeferred<Throwable?>()
             val responseBuilder = StringBuilder()
             // How many of the message's tool calls have already been forwarded. The SDK
             // re-delivers the full list on each callback, so forward only the new tail.
@@ -1390,8 +1392,7 @@ class LiteRtRuntime(
                         }
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
-                        nativeFinished.complete(Unit)
-                        close()
+                        nativeFinished.complete(null)
                     }
                     override fun onError(throwable: Throwable) {
                         // The KV-cache state is now unknown — force the next turn cold.
@@ -1400,28 +1401,41 @@ class LiteRtRuntime(
                         instance.completedToolTurn = null
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
-                        nativeFinished.complete(Unit)
-                        if (throwable is CancellationException) close() else close(throwable)
+                        nativeFinished.complete(throwable)
                     }
                 },
                 emptyMap(),
             )
             try {
-                awaitClose {
-                    // A cancelled collector must request native stop before another turn
-                    // can use the Engine. The callback is asynchronous, so the mutex must
-                    // remain held briefly while we await its completion acknowledgment.
-                    if (!generationFinished.get()) {
-                        cancellationRequested.set(true)
-                        android.util.Log.i("LiteRtRuntime", "stream cancelled; request native stop")
-                        runCatching { conv.cancelProcess() }
-                            .onFailure { android.util.Log.w("LiteRtRuntime", "cancelProcess failed", it) }
-                        instance.processed.clear()
-                        instance.pendingToolBatch = null
-                        instance.completedToolTurn = null
+                // Do not close the response channel in onDone: publish the final KV
+                // snapshot from this coroutine, outside the native callback thread.
+                val error = nativeFinished.await()
+                if (error == null) {
+                    val count = runCatching { conv.getTokenCount() }
+                        .onFailure { android.util.Log.d("LiteRtRuntime", "getTokenCount unavailable", it) }
+                        .getOrNull()
+                    if (count != null && count >= 0) {
+                        android.util.Log.i(
+                            "LiteRtRuntime",
+                            "streamTurns: kvTokens=$count/${instance.engineKey.maxNumTokens}",
+                        )
+                        send(StreamEvent.ContextTokens(count))
                     }
+                } else if (error !is CancellationException) {
+                    throw error
                 }
             } finally {
+                // A cancelled collector must request native stop before another turn
+                // can use the Engine. Keep the mutex until acknowledgment or timeout.
+                if (!generationFinished.get()) {
+                    cancellationRequested.set(true)
+                    android.util.Log.i("LiteRtRuntime", "stream cancelled; request native stop")
+                    runCatching { conv.cancelProcess() }
+                        .onFailure { android.util.Log.w("LiteRtRuntime", "cancelProcess failed", it) }
+                    instance.processed.clear()
+                    instance.pendingToolBatch = null
+                    instance.completedToolTurn = null
+                }
                 if (cancellationRequested.get()) {
                     withContext(NonCancellable) {
                         val acknowledged = withTimeoutOrNull(1_500L) {
@@ -1435,17 +1449,6 @@ class LiteRtRuntime(
                             )
                         }
                     }
-                } else if (generationFinished.get()) {
-                    // Token count is diagnostic only, and must run outside the native
-                    // onDone callback to avoid JNI re-entrancy on its worker thread.
-                    runCatching { conv.getTokenCount() }
-                        .onSuccess { count ->
-                            android.util.Log.i(
-                                "LiteRtRuntime",
-                                "streamTurns: kvTokens=$count/${instance.engineKey.maxNumTokens}",
-                            )
-                        }
-                        .onFailure { android.util.Log.d("LiteRtRuntime", "getTokenCount unavailable", it) }
                 }
             }
         } } finally {

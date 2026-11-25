@@ -70,6 +70,29 @@ class AgentLoopTest {
     }
 
     @Test
+    fun `context snapshot is replaced across tool steps rather than accumulated`() = runTest {
+        provider.stream {
+            toolCall("call-1", "search")
+            emit(StreamChunk.Finish(contextTokenCount = 1800))
+        }
+        provider.stream {
+            text("answer")
+            emit(StreamChunk.Finish(contextTokenCount = 900))
+        }
+        val message = runToEnd(request(tools = listOf(tool("search")))).finished().message
+        assertEquals(900, message.contextTokens())
+        assertNull(message.usage)
+    }
+
+    @Test
+    fun `non streaming context snapshot is preserved without usage`() = runTest {
+        provider.result(assistant(UIMessagePart.Text("answer")).copy(contextTokenCount = 1800))
+        val message = runToEnd(request(stream = false)).finished().message
+        assertEquals(1800, message.contextTokens())
+        assertNull(message.usage)
+    }
+
+    @Test
     fun `reply without tool calls completes after one request`() = runTest {
         provider.stream {
             text("hello")
