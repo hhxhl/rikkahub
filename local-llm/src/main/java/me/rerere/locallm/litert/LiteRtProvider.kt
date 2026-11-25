@@ -157,13 +157,16 @@ class LiteRtProvider(
     ): TextGenerationResult {
         var collected = listOf(UIMessage(role = MessageRole.ASSISTANT, parts = emptyList()))
         val handler = StreamChunkHandler(params.model)
+        var finishReason: String? = null
         streamText(providerSetting, messages, params).collect { chunk ->
+            if (chunk is StreamChunk.Finish) finishReason = chunk.finishReason
             collected = handler.handle(collected, chunk)
         }
         return TextGenerationResult(
             id = "litert-${System.currentTimeMillis()}",
             model = params.model.modelId,
             message = collected.last(),
+            finishReason = finishReason,
         )
     }
 
@@ -281,6 +284,7 @@ class LiteRtProvider(
         val droppedTools = mutableListOf<String>()
         val toolCapable = ModelAbility.TOOL in params.model.abilities ||
             LiteRtModelMetadata.canDeclareTools(params.model.modelId, LiteRtModelMetadata.inspect(java.io.File(modelPath))?.tools)
+        if (!toolCapable) droppedTools += params.tools.map { it.name }
         val declarations = (if (toolCapable) params.tools else emptyList()).mapNotNull { tool ->
             val declaration = LiteRtToolDeclaration(tool)
             val cost = declaration.declarationJson.toByteArray(Charsets.UTF_8).size + TOOL_OVERHEAD_BYTES
@@ -307,7 +311,7 @@ class LiteRtProvider(
         if (droppedTools.isNotEmpty()) {
             Log.w(
                 TAG,
-                "dropped ${droppedTools.size} tool(s) over the declaration budget: " +
+                "unavailable ${droppedTools.size} tool(s) (model capability or declaration budget): " +
                     droppedTools.joinToString(",").take(300),
             )
         }
@@ -528,6 +532,8 @@ class LiteRtProvider(
                     images = turnImages,
                     audioClips = turnAudio,
                     maxOutputToken = outputTokenLimit(effectiveMaxNumTokens, prefillBytes, params.maxTokens),
+                    preferContextCompression = params.preferContextCompression,
+                    responseReservePercent = reservePercent,
                 ).collect { event ->
                     when (event) {
                         is StreamEvent.ThinkingDelta -> {
@@ -582,6 +588,8 @@ class LiteRtProvider(
             finishReason = if (toolCallCount > 0) "tool_calls" else "stop",
             contextTokenCount = contextTokenCount,
             contextHistoryTrimmed = trimmed.size != untrimmedTurnCount,
+            contextCapacityTokens = effectiveMaxNumTokens,
+            unavailableToolNames = droppedTools.distinct(),
         ))
         } finally {
             currentBitmaps.forEach { it.recycle() }

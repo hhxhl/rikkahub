@@ -42,6 +42,8 @@ data class UIMessage(
     // Provider-reported context occupancy after the latest request (not cumulative usage).
     val contextTokenCount: Int? = null,
     val contextHistoryTrimmed: Boolean = false,
+    val contextCapacityTokens: Int? = null,
+    val unavailableToolNames: List<String> = emptyList(),
 ) {
     fun summaryAsText(maxLength: Int = Int.MAX_VALUE): String {
         val text = "[${role.name}]: " + parts.joinToString(separator = "\n") { part ->

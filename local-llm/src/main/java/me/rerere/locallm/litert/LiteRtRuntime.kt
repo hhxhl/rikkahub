@@ -68,9 +68,17 @@ const val ROLE_ASSISTANT = "assistant"
  * warm [Conversation]'s KV cache can be reused (see [planTurns]). A content digest
  * prevents ordinary String.hashCode collisions from accepting stale KV state.
  */
-private fun contentDigest(text: String): String =
-    MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+private fun contentDigest(text: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+    val hex = "0123456789abcdef"
+    return buildString(digest.size * 2) {
+        digest.forEach {
+            val value = it.toInt() and 0xff
+            append(hex[value ushr 4])
+            append(hex[value and 0xf])
+        }
+    }
+}
 
 fun turnSignature(role: String, text: String): String = "$role|${text.length}|${contentDigest(text)}"
 
@@ -102,7 +110,8 @@ data class Turn(
     val images: List<UIMessagePart.Image> = emptyList(),
     val audio: List<UIMessagePart.Audio> = emptyList(),
 ) {
-    val signature: String get() = buildString {
+    val signature: String by lazy {
+        buildString {
         append(turnSignature(role, rawText))
         images.forEach { append("|image:${contentDigest(it.url)}") }
         audio.forEach { append("|audio:${contentDigest(it.url)}") }
@@ -115,6 +124,7 @@ data class Turn(
                     }.let { "tool:$it" }
                 }
             })}")
+        }
         }
     }
 }
@@ -1265,6 +1275,8 @@ class LiteRtRuntime(
         audioClips: List<ByteArray> = emptyList(),
         onThinking: ((String) -> Unit)? = null,
         maxOutputToken: Int? = null,
+        preferContextCompression: Boolean = false,
+        responseReservePercent: Int = 25,
     ): Flow<StreamEvent> = channelFlow {
         // GPU-boost the inference. Three levers, in order of effectiveness:
         //   1. PerformanceHintManager (API 33+). Opens a hint session for this thread
@@ -1398,6 +1410,30 @@ class LiteRtRuntime(
             }
 
             val conv = instance.conversation
+            // The live KV count is an inexpensive snapshot, not a hypothetical prompt
+            // tokenizer. Use it only for a verified warm append or native TOOL continuation.
+            val warmRemaining = if (nativeToolResults != null || plan is TurnPlan.Warm) {
+                val inputBytes = if (nativeToolResults != null) {
+                    nativeToolResults.sumOf {
+                        it.name.toByteArray(Charsets.UTF_8).size.toLong() +
+                            it.output.toByteArray(Charsets.UTF_8).size + 48
+                    }
+                } else inputText.toByteArray(Charsets.UTF_8).size.toLong()
+                runCatching { conv.getTokenCount() }.getOrNull()?.takeIf { it >= 0 }?.let { occupied ->
+                    (instance.engineKey.maxNumTokens.toLong() - occupied - (inputBytes + 1) / 2 - 96)
+                        .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
+                }
+            } else null
+            val reserve = maxOf(256, instance.engineKey.maxNumTokens * responseReservePercent / 100)
+            if (warmRemaining != null && warmRemaining < reserve && preferContextCompression &&
+                history.count { it.role == ROLE_USER } > 1) {
+                android.util.Log.i("LiteRtRuntime", "Warm KV budget requests preflight compression")
+                throw LocalContextCompressionRequiredException()
+            }
+            // A heuristic must not force a nonsensical one-token reply when the SDK may
+            // still have sufficient space. Keep its native overflow protection authoritative.
+            val effectiveOutputLimit = if (maxOutputToken != null && warmRemaining != null && warmRemaining > 0)
+                minOf(maxOutputToken, warmRemaining) else maxOutputToken
             // The other place a broken GPU delegate faults: it can survive engine init and
             // only die once real work is submitted. Re-arm for every turn; the first token
             // below disarms.
@@ -1509,7 +1545,7 @@ class LiteRtRuntime(
                     }
                 },
                 emptyMap(),
-                maxOutputToken = maxOutputToken,
+                maxOutputToken = effectiveOutputLimit,
             )
             } catch (t: Throwable) {
                 // A synchronous SDK submission error has no successful generation to reuse.

@@ -163,5 +163,8 @@ sealed class StreamChunk {
         // Actual occupied context, separate from cumulative input/output accounting.
         val contextTokenCount: Int? = null,
         val contextHistoryTrimmed: Boolean = false,
+        // Actual allocation, independent of the model's client compression window.
+        val contextCapacityTokens: Int? = null,
+        val unavailableToolNames: List<String> = emptyList(),
     ) : StreamChunk()
 }
