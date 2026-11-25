@@ -106,7 +106,7 @@ class McpManager(
     fun getAllAvailableTools(assistant: Assistant): List<Triple<Uuid, String, McpTool>> {
         val settings = settingsStore.settingsFlow.value
         return settings.mcpServers
-            .filter { it.commonOptions.enable && it.id in assistant.mcpServers }
+            .filter { it.commonOptions.enable && it.commonOptions.executionMode == McpExecutionMode.CLIENT && it.id in assistant.mcpServers }
             .flatMap { server ->
                 server.commonOptions.tools
                     .filter { tool -> tool.enable }

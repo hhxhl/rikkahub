@@ -106,7 +106,7 @@ internal class McpSessionRegistry(
 
     fun reconcile(configs: List<McpServerConfig>) {
         val activeConfigs = configs
-            .filter { it.commonOptions.enable && it.commonOptions.name.isNotBlank() }
+            .filter { it.commonOptions.enable && it.commonOptions.executionMode == McpExecutionMode.CLIENT && it.commonOptions.name.isNotBlank() }
             .associateBy { it.id }
 
         (sessions.keys - activeConfigs.keys).forEach { configId ->
@@ -171,7 +171,7 @@ internal class McpSessionRegistry(
             removeClient(configInput)
             return
         }
-        if (!desiredConfig.commonOptions.enable || desiredConfig.commonOptions.name.isBlank()) {
+        if (!desiredConfig.commonOptions.enable || desiredConfig.commonOptions.executionMode != McpExecutionMode.CLIENT || desiredConfig.commonOptions.name.isBlank()) {
             removeClient(desiredConfig)
             return
         }
@@ -384,6 +384,7 @@ internal class McpSessionRegistry(
             val latestConfig = settingsStore.settingsFlow.value.mcpServers.find {
                 it.id == session.config.id &&
                     it.commonOptions.enable &&
+                    it.commonOptions.executionMode == McpExecutionMode.CLIENT &&
                     it.commonOptions.name.isNotBlank()
             } ?: return
             session.config = latestConfig

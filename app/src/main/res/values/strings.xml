@@ -1939,6 +1939,21 @@
   <string name="quick_start_card_desc">RikkaHub needs a model provider to chat. Follow the quick start to set up a provider and default model, or migrate your chat history from DeepSeek.</string>
   <string name="setting_page_quick_start">Quick Start</string>
   <string name="setting_page_quick_start_desc">Set up providers and models step by step, or migrate from DeepSeek</string>
-    <string name="setting_asr_configure_prefer_offline">Prefer offline recognition</string>
-    <string name="setting_asr_configure_prefer_offline_desc">Request offline recognition when available. Turning this off allows the engine to choose online recognition.</string>
+  <string name="setting_provider_page_server_history">Server-managed history</string>
+  <string name="setting_provider_page_server_history_desc">Store responses on the API server to send only new context when possible. Requires a compatible Responses API and a single API key. Local chat history is retained.</string>
+  <string name="setting_mcp_execution_mode">Execution mode</string>
+  <string name="setting_mcp_execution_client">Client execution</string>
+  <string name="setting_mcp_execution_server">Server execution</string>
+  <string name="setting_mcp_execution_client_desc">RikkaHub connects to the MCP server and executes tools.</string>
+  <string name="setting_mcp_execution_server_desc">The model API connects to the MCP server. Requires a compatible Responses API with remote MCP support. MCP credentials are sent to the selected API provider; use only trusted providers.</string>
+  <string name="setting_mcp_execution_remote_tools">Tools are discovered and called by the model API during chat. Approval follows the configured policy.</string>
+  <string name="setting_mcp_remote_approval_policy">Approval policy</string>
+  <string name="setting_mcp_remote_read_only">Read only</string>
+  <string name="setting_mcp_remote_write_approval">Approve writes</string>
+  <string name="setting_mcp_remote_no_approval">No approval</string>
+  <string name="setting_mcp_remote_read_only_desc">Only allow tools annotated read-only. Use a read-only token.</string>
+  <string name="setting_mcp_remote_write_approval_desc">Read-only tools run automatically. Other tools require your explicit approval.</string>
+  <string name="setting_mcp_remote_no_approval_desc">All permitted tools can execute without confirmation, including writes. Only use with trusted servers.</string>
+  <string name="setting_asr_configure_prefer_offline">Prefer offline recognition</string>
+  <string name="setting_asr_configure_prefer_offline_desc">Request offline recognition when available. Turning this off allows the engine to choose online recognition.</string>
 </resources>

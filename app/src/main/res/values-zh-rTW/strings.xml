@@ -1935,6 +1935,21 @@
   <string name="quick_start_page_deepseek_import_desc">選擇上一步下載的 ZIP 檔案。每個聊天都會將目前顯示的分支匯入目前的助理 \"%1$s\"，包括推理和附件。已匯入的聊天會被略過，因此再次匯入是安全的。</string>
   <string name="quick_start_page_deepseek_importing">匯入中…</string>
   <string name="quick_start_page_deepseek_import_another">匯入另一個 ZIP</string>
-    <string name="setting_asr_configure_prefer_offline">優先離線辨識</string>
-    <string name="setting_asr_configure_prefer_offline_desc">要求優先使用離線辨識。關閉後允許辨識引擎選擇線上辨識。</string>
+  <string name="setting_provider_page_server_history">伺服器管理對話歷史</string>
+  <string name="setting_provider_page_server_history_desc">在 API 伺服器儲存回應，盡可能只傳送新增上下文。需要相容的 Responses API 和單一 API 金鑰。本機聊天記錄仍然保留。</string>
+  <string name="setting_mcp_execution_mode">執行方式</string>
+  <string name="setting_mcp_execution_client">用戶端執行</string>
+  <string name="setting_mcp_execution_server">伺服器端執行</string>
+  <string name="setting_mcp_execution_client_desc">由 RikkaHub 連線至 MCP 伺服器並執行工具。</string>
+  <string name="setting_mcp_execution_server_desc">由模型 API 連線至 MCP 伺服器，需要支援遠端 MCP 的相容 Responses API。MCP 認證資訊會傳送給所選 API 提供商，請僅使用可信提供商。</string>
+  <string name="setting_mcp_execution_remote_tools">工具由模型 API 在對話時探索及呼叫，並依所選策略審批。</string>
+  <string name="setting_mcp_remote_approval_policy">審批策略</string>
+  <string name="setting_mcp_remote_read_only">僅允許讀取</string>
+  <string name="setting_mcp_remote_write_approval">寫入需要審批</string>
+  <string name="setting_mcp_remote_no_approval">無需審批</string>
+  <string name="setting_mcp_remote_read_only_desc">僅允許標記為唯讀的工具，請使用唯讀權杖。</string>
+  <string name="setting_mcp_remote_write_approval_desc">唯讀工具自動執行，其他工具必須經過你的明確審批。</string>
+  <string name="setting_mcp_remote_no_approval_desc">允許在權杖權限範圍內自動執行工具，包括寫入操作。僅用於可信伺服器。</string>
+  <string name="setting_asr_configure_prefer_offline">優先離線辨識</string>
+  <string name="setting_asr_configure_prefer_offline_desc">要求優先使用離線辨識。關閉後允許辨識引擎選擇線上辨識。</string>
 </resources>

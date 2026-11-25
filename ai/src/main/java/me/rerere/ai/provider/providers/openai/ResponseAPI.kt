@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -34,6 +35,7 @@ import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.RemoteMcpApprovalPolicy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.TextGenerationResult
 import me.rerere.ai.provider.providers.PartGroup
@@ -49,6 +51,9 @@ import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.metadataAs
+import me.rerere.ai.ui.remoteMcpApprovalRequest
+import me.rerere.ai.ui.remoteMcpApprovalBinding
+import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
@@ -85,12 +90,19 @@ internal class ResponsesEndpoint(
     val capabilities: ResponseProviderCapabilities = ResponseProviderCapabilities(),
     // 构建请求时调用，负责请求头和鉴权；可挂起，以便先刷新 token
     val configureRequest: suspend Request.Builder.() -> Unit,
+    val historyScope: String? = null,
 )
 
 class ResponseAPI(
     private val client: OkHttpClient,
     private val keyRoulette: KeyRoulette = KeyRoulette.default()
 ) : OpenAIImpl {
+    private val responseHistory = ResponseHistory()
+    private val noRetryClient by lazy { client.newBuilder().retryOnConnectionFailure(false).build() }
+
+    private fun requestClient(params: TextGenerationParams): OkHttpClient =
+        if (params.remoteMcpTools.any { it.approvalPolicy != RemoteMcpApprovalPolicy.READ_ONLY }) noRetryClient else client
+
     override suspend fun generateText(
         providerSetting: ProviderSetting.OpenAI,
         messages: List<UIMessage>,
@@ -106,6 +118,7 @@ class ResponseAPI(
     private fun ProviderSetting.OpenAI.toResponsesEndpoint(params: TextGenerationParams) = ResponsesEndpoint(
         url = "$baseUrl$responsesPath",
         capabilities = resolveResponseProviderCapabilities(baseUrl.toHttpUrl().host),
+        historyScope = responseHistoryScope(this, params),
         configureRequest = {
             headers(mergeCustomHeaders(params.customHeaders))
             addHeader("Authorization", "Bearer ${keyRoulette.next(apiKey, id.toString())}")
@@ -119,43 +132,107 @@ class ResponseAPI(
         messages: List<UIMessage>,
         params: TextGenerationParams
     ): TextGenerationResult = withContext(Dispatchers.IO) {
-        val requestBody = buildRequestBody(
-            capabilities = endpoint.capabilities,
-            messages = messages,
-            params = params,
-            stream = false,
-        )
-        val request = Request.Builder()
-            .url(endpoint.url)
-            .apply { endpoint.configureRequest(this) }
-            .post(json.encodeToString(requestBody).toRequestBody("application/json".toMediaType()))
-            .addHeader("Content-Type", "application/json")
-            .build()
-
-
-        // await() waits for the response headers; reading the body can still block.
-        client.newCall(request).await().use { response ->
-            if (!response.isSuccessful) {
-                throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+        val fullBody = buildRequestBody(endpoint.capabilities, messages, params, stream = false)
+        val attempt = responseHistory.prepare(endpoint.historyScope, fullBody)
+        suspend fun send(body: JsonObject): JsonObject {
+            val request = Request.Builder()
+                .url(endpoint.url)
+                .apply { endpoint.configureRequest(this) }
+                .post(json.encodeToString(body).toRequestBody("application/json".toMediaType()))
+                .addHeader("Content-Type", "application/json")
+                .build()
+            return requestClient(params).newCall(request).await().use { response ->
+                val raw = response.body.string()
+                if (!response.isSuccessful) {
+                    if (isPreviousResponseMissing(response.code, raw)) throw PreviousResponseMissing()
+                    throw Exception("Failed to get response: ${response.code} $raw")
+                }
+                json.parseToJsonElement(raw).jsonObject
             }
-
-            val bodyStr = response.body.string()
-            val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
-            parseResponseOutput(bodyJson)
         }
+        val result = try {
+            send(attempt.body)
+        } catch (e: PreviousResponseMissing) {
+            if (!attempt.continued) throw e
+            responseHistory.invalidate(attempt)
+            send(attempt.fullBody)
+        }
+        val parsed = parseResponseOutput(result, params.remoteMcpTools.associate { it.label to it.approvalBinding })
+        rememberHistory(attempt, result)
+        parsed
     }
 
     internal fun streamText(
         endpoint: ResponsesEndpoint,
         messages: List<UIMessage>,
         params: TextGenerationParams
+    ): Flow<StreamChunk> = flow {
+        val fullBody = buildRequestBody(endpoint.capabilities, messages, params, stream = true)
+        val attempt = responseHistory.prepare(endpoint.historyScope, fullBody)
+        var emitted = false
+        try {
+            streamRequest(endpoint, attempt.body, requestClient(params), params.remoteMcpTools.associate { it.label to it.approvalBinding }) { rememberHistory(attempt, it) }.collect {
+                emitted = true
+                emit(it)
+            }
+        } catch (e: PreviousResponseMissing) {
+            // Never replay after output/tool events have already been delivered.
+            if (!attempt.continued || emitted) throw e
+            responseHistory.invalidate(attempt)
+            streamRequest(endpoint, attempt.fullBody, requestClient(params), params.remoteMcpTools.associate { it.label to it.approvalBinding }) { rememberHistory(attempt, it) }.collect { emit(it) }
+        }
+    }.flowOn(Dispatchers.IO)
+
+    private fun rememberHistory(attempt: ResponseHistory.Attempt, response: JsonObject) {
+        if (attempt.scope == null) return
+        // A failure to normalize optional state must not fail an otherwise successful reply.
+        runCatching {
+            val id = response["id"]?.jsonPrimitive?.contentOrNull ?: return
+            if (response["status"]?.jsonPrimitive?.contentOrNull != "completed") return
+            val prefix = historyOutput(response) ?: return
+            responseHistory.remember(attempt, id, prefix)
+        }
+    }
+
+    internal fun historyOutput(response: JsonObject): List<kotlinx.serialization.json.JsonElement>? {
+        val output = response["output"]?.jsonArray ?: return null
+        if (output.isEmpty() || output.any { item ->
+                val obj = item.jsonObject
+                val type = obj["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                type !in setOf("message", "reasoning", "function_call") &&
+                    !isOpenAIServerToolCall(type)
+            }) return null
+        val message = parseResponseOutput(response).message
+        val pending = message.parts.filterIsInstance<UIMessagePart.Tool>()
+            .filterNot { it.isExecuted }.map { it.toolCallId }.toSet()
+        // The normal history serializer skips unexecuted tools. Mark them as
+        // executed only in this temporary copy to serialize their call items,
+        // then remove the synthetic results (the server has not received them).
+        val normalized = message.copy(parts = message.parts.map { part ->
+            if (part is UIMessagePart.Tool && part.toolCallId in pending) {
+                part.copy(output = listOf(UIMessagePart.Text("")))
+            } else part
+        })
+        val prefix = buildMessages(listOf(normalized)).filterNot { item ->
+            val obj = item.jsonObject
+            obj["type"]?.jsonPrimitive?.contentOrNull == "function_call_output" &&
+                obj["call_id"]?.jsonPrimitive?.contentOrNull in pending
+        }
+        // Never commit a checkpoint that omitted a call.
+        val serializedCalls = prefix.map { it.jsonObject }.filter {
+            it["type"]?.jsonPrimitive?.contentOrNull == "function_call"
+        }.mapNotNull { it["call_id"]?.jsonPrimitive?.contentOrNull }.toSet()
+        if (!serializedCalls.containsAll(pending)) return null
+        return prefix.takeIf { it.isNotEmpty() }
+    }
+
+    private fun streamRequest(
+        endpoint: ResponsesEndpoint,
+        requestBody: JsonObject,
+        requestClient: OkHttpClient,
+        approvalBindings: Map<String, String>,
+        onCompleted: (JsonObject) -> Unit,
     ): Flow<StreamChunk> = callbackFlow {
-        val requestBody = buildRequestBody(
-            capabilities = endpoint.capabilities,
-            messages = messages,
-            params = params,
-            stream = true,
-        )
         val request = Request.Builder()
             .url(endpoint.url)
             .apply { endpoint.configureRequest(this) }
@@ -163,7 +240,7 @@ class ResponseAPI(
             .build()
 
 
-        val decoder = ResponseApiStreamDecoder()
+        val decoder = ResponseApiStreamDecoder(approvalBindings)
 
         fun sendChunks(chunks: Iterable<StreamChunk>) {
             chunks.forEach { chunk ->
@@ -182,6 +259,12 @@ class ResponseAPI(
             ) {
                 try {
                     val result = decoder.accept(SseEvent(id = id, event = type, data = data))
+                    if (result.completed && data != "[DONE]") {
+                        val payload = json.parseToJsonElement(data).jsonObject
+                        if (payload["type"]?.jsonPrimitive?.contentOrNull == "response.completed") {
+                            payload["response"]?.jsonObjectOrNull?.let(onCompleted)
+                        }
+                    }
                     sendChunks(result.chunks)
                     if (result.completed) close()
                 } catch (e: Throwable) {
@@ -195,6 +278,10 @@ class ResponseAPI(
 
 
                 val bodyRaw = response?.body?.stringSafe()
+                if (isPreviousResponseMissing(response?.code, bodyRaw)) {
+                    close(PreviousResponseMissing())
+                    return
+                }
                 try {
                     if (!bodyRaw.isNullOrBlank()) {
                         val bodyElement = Json.parseToJsonElement(bodyRaw)
@@ -213,7 +300,7 @@ class ResponseAPI(
             }
         }
 
-        val eventSource = client.newEventSource(request, listener)
+        val eventSource = requestClient.newEventSource(request, listener)
 
         awaitClose {
             eventSource.cancel()
@@ -227,6 +314,7 @@ class ResponseAPI(
         params: TextGenerationParams,
         stream: Boolean
     ): JsonObject {
+        validateRemoteMcpApprovals(messages, params.remoteMcpTools)
         return buildJsonObject {
             put("model", params.model.modelId)
             put("stream", stream)
@@ -323,7 +411,7 @@ class ResponseAPI(
                     }
                 }
             }
-        }.mergeCustomBody(params.customBody)
+        }.mergeCustomBody(params.customBody).withRemoteMcpTools(params.remoteMcpTools)
     }
 
     internal fun buildMessages(messages: List<UIMessage>) = buildJsonArray {
@@ -338,14 +426,14 @@ class ResponseAPI(
             }
             .forEach { message ->
                 if (message.role == MessageRole.ASSISTANT) {
-                    addAssistantItems(message)
+                    addAssistantItems(message, message === messages.lastOrNull())
                 } else {
                     addUserItems(message)
                 }
             }
     }
 
-    private fun JsonArrayBuilder.addAssistantItems(message: UIMessage) {
+    private fun JsonArrayBuilder.addAssistantItems(message: UIMessage, active: Boolean) {
         val groups = groupPartsByToolBoundary(message.parts)
         val contentBuffer = mutableListOf<UIMessagePart>()
 
@@ -440,8 +528,16 @@ class ResponseAPI(
                         contentBuffer.clear()
                     }
 
+                    val remote = group.tools.filter { it.remoteMcpApprovalRequest != null }
+                    val local = group.tools.filter { it.remoteMcpApprovalRequest == null }
+                    // Only retain resolved historical approval pairs or the active approval batch.
+                    val completedApprovals = message.parts.filterIsInstance<UIMessagePart.ServerTool>()
+                        .mapNotNull { it.metadataAs<ServerToolMetadata>()?.call?.get("approval_request_id")?.jsonPrimitive?.contentOrNull }.toSet()
+                    val approvals = remote.filter { it.toolCallId in completedApprovals ||
+                        (active && group === groups.lastOrNull()) }
+                    approvals.forEach { add(checkNotNull(it.remoteMcpApprovalRequest)) }
                     // 同一批并发工具调用需先输出全部 function_call，再输出对应结果。
-                    group.tools.forEach { tool ->
+                    local.forEach { tool ->
                         add(buildJsonObject {
                             put("type", "function_call")
                             put("call_id", tool.toolCallId)
@@ -450,7 +546,8 @@ class ResponseAPI(
                             put("arguments", tool.inputAsJson().toString())
                         })
                     }
-                    group.tools.forEach { tool ->
+                    approvals.forEach { add(it.toRemoteMcpApprovalResponse()) }
+                    local.forEach { tool ->
                         add(buildJsonObject {
                             put("type", "function_call_output")
                             put("call_id", tool.toolCallId)
@@ -569,7 +666,7 @@ class ResponseAPI(
         })
     }
 
-    internal fun parseResponseOutput(jsonObject: JsonObject): TextGenerationResult {
+    internal fun parseResponseOutput(jsonObject: JsonObject, approvalBindings: Map<String, String> = emptyMap()): TextGenerationResult {
         val outputs = jsonObject["output"]?.jsonArray ?: error("output not found")
         val parts = arrayListOf<UIMessagePart>()
 
@@ -625,6 +722,8 @@ class ResponseAPI(
                         )
                     }
                 }
+
+                "mcp_approval_request" -> parts.add(output.toRemoteMcpApprovalTool(approvalBindings))
 
                 "function_call" -> {
                     val callId = output["call_id"]?.jsonPrimitive?.content ?: error("call_id not found")
@@ -713,26 +812,30 @@ internal fun JsonObject.functionCallOutputText(): String = when (val output = ge
 }
 
 internal fun isOpenAIServerToolCall(type: String): Boolean =
-    type.endsWith("_call") && type !in setOf(
+    type == "mcp_list_tools" || (type.endsWith("_call") && type !in setOf(
         "function_call",
         "custom_tool_call",
         "computer_call",
         "local_shell_call",
         "shell_call",
         "image_generation_call",
-    )
+    ))
 
 internal fun JsonObject.toOpenAIServerTool(): UIMessagePart.ServerTool {
     val type = get("type")?.jsonPrimitive?.contentOrNull ?: "server_tool_call"
-    val protocolFields = setOf("type", "id", "status", "result", "output")
+    val protocolFields = setOf("type", "id", "status", "result", "output", "error", "tools")
     val input = get("action") ?: JsonObject(filterKeys { it !in protocolFields })
         .takeUnless { it.isEmpty() }
     return UIMessagePart.ServerTool(
         toolCallId = get("id")?.jsonPrimitive?.contentOrNull ?: "",
         toolName = type.removeSuffix("_call"),
         input = input,
-        output = get("output") ?: get("result"),
-        status = get("status")?.jsonPrimitive?.contentOrNull.toServerToolStatus(),
+        output = get("output") ?: get("result") ?: get("tools") ?: get("error"),
+        status = when {
+            get("error")?.let { it != JsonNull } == true -> ServerToolStatus.FAILED
+            type == "mcp_list_tools" && get("tools") is JsonArray -> ServerToolStatus.COMPLETED
+            else -> get("status")?.jsonPrimitive?.contentOrNull.toServerToolStatus()
+        },
         metadata = ServerToolMetadata(
             protocol = ServerToolProtocol.OPENAI_RESPONSES,
             call = this,

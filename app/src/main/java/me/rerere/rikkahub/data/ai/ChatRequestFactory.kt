@@ -6,6 +6,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.serialization.json.JsonPrimitive
+import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.agent.AgentHooks
 import me.rerere.ai.agent.AgentRequest
 import me.rerere.ai.agent.RetryPolicy
@@ -19,9 +21,11 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.rikkahub.data.ai.mcp.remoteMcpTools
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.limitContext
+import me.rerere.ai.ui.remoteMcpApprovalRequest
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.prompts.buildMemoryPrompt
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
@@ -215,7 +219,13 @@ class ChatRequestFactory(
                 providerSetting = turn.providerSetting,
                 messages = requestMessages + UIMessage.user(compressPrompt),
                 // 助手的输出上限是给聊天回复定的，结构化摘要写不完会被截断；max_tokens 不属于请求前缀，改了不影响缓存
-                params = params.copy(maxTokens = null),
+                params = params.copy(
+                    maxTokens = null,
+                    // An automatic summary must never initiate an MCP write, including
+                    // on a server configured to execute without approval.
+                    customBody = if (params.remoteMcpTools.isEmpty()) params.customBody else
+                        params.customBody + CustomBody("tool_choice", JsonPrimitive("none")),
+                ),
             )
         }
         val summary = result.message.compressionSummaryOrNull()
@@ -282,8 +292,12 @@ class ChatRequestFactory(
                 addAll(turn.model.customBodies)
             },
             sessionId = turn.conversationId.toString(),
+            remoteMcpTools = remoteMcpTools(turn.settings.mcpServers, assistant.mcpServers, turn.providerSetting, turn.model.modelId),
         )
-        return StepRequest(requestMessages, params)
+        val supportsRemote = (turn.providerSetting as? ProviderSetting.OpenAI)?.useResponseApi == true
+        return StepRequest(if (supportsRemote) requestMessages else requestMessages.map { message ->
+            message.copy(parts = message.parts.filterNot { it is UIMessagePart.Tool && it.remoteMcpApprovalRequest != null })
+        }, params)
     }
 }
 

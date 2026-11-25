@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
@@ -179,6 +181,45 @@ class AgentLoopTest {
         assertEquals(listOf("write", "read"), executed)
         assertEquals(waiting.id, finished.message.id)
         assertTrue(provider.requests[1].messages.last().getTools().all { it.isExecuted })
+    }
+
+    @Test
+    fun `remote MCP approval pauses and resumes without local execution`() = runTest {
+        val user = UIMessage.user("write")
+        val metadata = buildJsonObject {
+            put("remote_mcp_approval", buildJsonObject {
+                put("type", "mcp_approval_request")
+                put("id", "mcpr_test")
+                put("server_label", "github")
+                put("name", "create_branch")
+                put("arguments", "{}")
+            })
+            put("remote_mcp_binding", "binding")
+        }
+        val req = request(messages = listOf(user)).copy(providerSetting = ProviderSetting.OpenAI(useResponseApi = true))
+        provider.stream {
+            emit(StreamChunk.ToolCallStart("mcpr_test", "MCP: github / create_branch", metadata))
+            emit(StreamChunk.ToolCallDelta("mcpr_test", inputDelta = "{}"))
+            emit(StreamChunk.ToolCallEnd("mcpr_test"))
+            finish()
+        }
+        val waiting = runToEnd(req).finished()
+        assertEquals(AgentFinishReason.AwaitingApproval(setOf("mcpr_test")), waiting.reason)
+        assertEquals(ToolApprovalState.Pending, waiting.message.tool("mcpr_test").approvalState)
+        provider.stream {
+            text("server reply")
+            finish()
+        }
+        val approved = waiting.message.withApproval("mcpr_test", ToolApprovalState.Approved)
+        val resumeHooks = object : AgentHooks by hooks {
+            override suspend fun shouldPause(message: UIMessage): Boolean = error("approval must reach the server before compression")
+            override suspend fun pendingParts(): List<UIMessagePart> = error("approval must reach the server before notices")
+        }
+        val finished = runToEnd(req.copy(messages = listOf(user, approved)), resumeHooks).finished()
+        assertEquals(AgentFinishReason.Completed, finished.reason)
+        assertTrue(provider.requests.last().messages.last().tool("mcpr_test").isExecuted)
+        assertNull(finished.message.tool("mcpr_test").startedAt)
+        assertEquals(listOf("server reply"), finished.message.texts())
     }
 
     @Test
