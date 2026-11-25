@@ -75,6 +75,8 @@ data class TextGenerationParams(
     val customBody: List<CustomBody> = emptyList(),
     val sessionId: String? = Uuid.random().toString(),
     val remoteMcpTools: List<RemoteMcpTool> = emptyList(),
+    /** If supported, signal a needed history trim before inference instead of silently dropping turns. */
+    val preferContextCompression: Boolean = false,
 )
 
 @Serializable

@@ -140,6 +140,7 @@ class ChatRequestFactory(
         messages: List<UIMessage>,
         processingStatus: MutableStateFlow<String?>,
         takePendingParts: suspend () -> List<UIMessagePart> = { emptyList() },
+        preferContextCompression: Boolean = false,
         pauseAfterTools: (UIMessage) -> Boolean = { false },
     ): Pair<AgentRequest, AgentHooks> {
         val request = AgentRequest(
@@ -156,7 +157,8 @@ class ChatRequestFactory(
         val hooks = object : AgentHooks {
             override suspend fun prepareStep(messages: List<UIMessage>): StepRequest {
                 Log.i(TAG, "prepareStep: ${turn.model.id}")
-                return buildStep(turn, messages, processingStatus)
+                val step = buildStep(turn, messages, processingStatus)
+                return step.copy(params = step.params.copy(preferContextCompression = preferContextCompression))
             }
 
             override suspend fun previewStep(message: UIMessage, newPartsFrom: Int) =

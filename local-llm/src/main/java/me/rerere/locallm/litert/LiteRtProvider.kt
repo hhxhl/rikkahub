@@ -35,6 +35,11 @@ internal fun localToolBatchId(id: String): String? =
 /** A local prompt did not fit; compression may retry with smaller complete batches. */
 class LocalContextBudgetException(message: String, cause: Throwable? = null) : IllegalArgumentException(message, cause)
 
+/** No native inference has been submitted: the host can summarize earlier turns and retry. */
+class LocalContextCompressionRequiredException : IllegalArgumentException(
+    "LiteRT input requires history trimming; compress older turns before inference."
+)
+
 /**
  * Map RikkaHub's existing reasoning picker to the LiteRT-LM 0.19.1 native API.
  * AUTO inherits the model's default instead of forcing thinking on or off.
@@ -339,6 +344,10 @@ class LiteRtProvider(
             coldBlob = renderColdBlob(trimmed, historyBudget)
         }
         if (trimmed.size != untrimmedTurnCount) {
+            if (params.preferContextCompression) {
+                Log.i(TAG, "history requires compression before LiteRT generation")
+                throw LocalContextCompressionRequiredException()
+            }
             Log.i(TAG, "history trimmed: $untrimmedTurnCount -> ${trimmed.size} turns; " +
                 "dropped=${untrimmedTurnCount - trimmed.size}")
         }

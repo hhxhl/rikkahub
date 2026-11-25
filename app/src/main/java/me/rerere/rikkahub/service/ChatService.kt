@@ -38,6 +38,8 @@ import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.isEmptyInputMessage
+import me.rerere.locallm.litert.LocalContextCompressionRequiredException
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.common.android.Logging
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.R
@@ -728,6 +730,10 @@ class ChatService(
             // 上一段是压缩后新开的；摘要加系统提示词本身就超过阈值时再压也没用，这一轮不再压缩
             var afterCompression = false
             var compressionUseless = false
+            // One preflight attempt per turn; if the summary cannot fit or fails,
+            // allow the service's safety trimming on the retry. Do not edit a
+            // regeneration branch before its new response has been created.
+            var preflightAttempted = false
             try {
                 while (true) {
                     val replyNodeId = target.nodeId
@@ -737,6 +743,9 @@ class ChatService(
                         messages = target.history,
                         processingStatus = session.processingStatus,
                         takePendingParts = session.inbox::takeNotices,
+                        preferContextCompression = regenerateNodeId == null &&
+                            turn.providerSetting is ProviderSetting.LiteRtLocal &&
+                            settings.enableAutoCompress && !preflightAttempted,
                         pauseAfterTools = pause@{ message ->
                             if (!canCompress || compressionUseless) return@pause false
                             // 同一条回复只试一次，压缩失败后接着它写时不再重试
@@ -750,6 +759,7 @@ class ChatService(
                         },
                     )
                     finishReason = null
+                    try {
                     runAgent(request, hooks).flowOn(Dispatchers.IO).collect { event ->
                         when (event) {
                             is AgentEvent.MessageUpdated -> {
@@ -774,6 +784,15 @@ class ChatService(
                                 finishReason = event.reason
                             }
                         }
+                    }
+                    } catch (e: LocalContextCompressionRequiredException) {
+                        // The provider raised this before any inference for this step.
+                        // Any preceding tool results have already been saved by AgentLoop.
+                        preflightAttempted = true
+                        afterCompression = compressBeforeInference(session)
+                        target = replyTargetOf(session.state.value, regenerateNodeId = null)
+                        session.replyMessageId.value = target.continuedMessageId
+                        continue
                     }
                     if (finishReason != AgentFinishReason.Paused) break
 
@@ -1052,6 +1071,37 @@ class ChatService(
      *
      * @return 是否压缩成功；失败时报告错误，这一轮照常继续
      */
+    private suspend fun compressBeforeInference(session: ConversationSession): Boolean {
+        val messages = session.state.value.currentMessages
+        val checkpoint = messages.indexOfLast { it.isContextCheckpoint }
+        val currentUser = messages.indexOfLast { it.role == MessageRole.USER && !it.isContextCheckpoint }
+        // Keep the whole current USER-led segment, including any executed tool results.
+        // Never summarize the user's pending request instead of answering it.
+        val keepRecent = if (currentUser > checkpoint) messages.size - currentUser else 1
+        if (messages.size - keepRecent <= checkpoint + 1) return false
+        session.finishGeneration()
+        session.setActivity(SessionActivity.Compressing)
+        session.processingStatus.value = context.getString(R.string.chat_page_compressing)
+        return try {
+            insertCompressionCheckpoint(
+                session = session,
+                additionalPrompt = "",
+                keepRecentMessages = keepRecent,
+                clearSuggestions = false,
+            )
+            Log.i(TAG, "LiteRT preflight compression completed; retrying the original input")
+            true
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "LiteRT preflight compression failed; retrying with safety trimming", e)
+            addError(e, session.id, title = context.getString(R.string.error_title_auto_compress))
+            false
+        } finally {
+            session.processingStatus.value = null
+            if (currentCoroutineContext().isActive) session.setActivity(SessionActivity.Generating)
+        }
+    }
+
     private suspend fun compressMidTurn(session: ConversationSession): Boolean {
         val reply = session.state.value.currentMessages.lastOrNull { it.role == MessageRole.ASSISTANT }
         session.autoCompressedReplyId = reply?.id
