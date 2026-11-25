@@ -166,5 +166,7 @@ sealed class StreamChunk {
         // Actual allocation, independent of the model's client compression window.
         val contextCapacityTokens: Int? = null,
         val unavailableToolNames: List<String> = emptyList(),
+        val requestedToolCount: Int? = null,
+        val declaredToolCount: Int? = null,
     ) : StreamChunk()
 }

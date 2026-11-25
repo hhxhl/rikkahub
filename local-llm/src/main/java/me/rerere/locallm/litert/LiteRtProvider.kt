@@ -297,6 +297,7 @@ class LiteRtProvider(
             }
         }
         val nativeTools: List<ToolProvider> = declarations.map { litertTool(it) }
+        val declaredToolNames = params.tools.map { it.name }.toSet() - droppedTools.toSet()
         if (params.tools.isNotEmpty()) {
             Log.i(
                 TAG,
@@ -560,6 +561,9 @@ class LiteRtProvider(
                             // finishes approval/execution. This allows a later native
                             // Message.tool response to match exactly the original call.
                             event.calls.forEach { call ->
+                                require(call.name in declaredToolNames) {
+                                    "LiteRT requested an undeclared tool: ${call.name}"
+                                }
                                 toolCallCount++
                                 Log.i(TAG, "model requested tool '${call.name}' (id=${call.id})")
                                 emit(StreamChunk.ToolCallStart(id = call.id, toolName = call.name))
@@ -590,6 +594,8 @@ class LiteRtProvider(
             contextHistoryTrimmed = trimmed.size != untrimmedTurnCount,
             contextCapacityTokens = effectiveMaxNumTokens,
             unavailableToolNames = droppedTools.distinct(),
+            requestedToolCount = params.tools.size,
+            declaredToolCount = nativeTools.size,
         ))
         } finally {
             currentBitmaps.forEach { it.recycle() }

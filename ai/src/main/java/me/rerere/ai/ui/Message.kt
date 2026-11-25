@@ -44,6 +44,8 @@ data class UIMessage(
     val contextHistoryTrimmed: Boolean = false,
     val contextCapacityTokens: Int? = null,
     val unavailableToolNames: List<String> = emptyList(),
+    val requestedToolCount: Int? = null,
+    val declaredToolCount: Int? = null,
 ) {
     fun summaryAsText(maxLength: Int = Int.MAX_VALUE): String {
         val text = "[${role.name}]: " + parts.joinToString(separator = "\n") { part ->

@@ -85,7 +85,14 @@ fun ChatMessageNerdLine(
             RichTooltip(
                 title = { Text(stringResource(R.string.chat_message_usage_title)) },
             ) {
-                UsageDetails(stats, contextLength)
+                UsageDetails(
+                    stats = stats,
+                    contextLength = message.contextCapacityTokens ?: contextLength,
+                    localStatus = message.takeIf { it.contextCapacityTokens != null },
+                    compressionThreshold = contextLength?.takeIf { settings.enableAutoCompress }
+                        ?.let { kotlin.math.ceil(it * settings.autoCompressThreshold.toDouble()).toInt() },
+                    autoCompressEnabled = settings.enableAutoCompress,
+                )
             }
         },
         state = tooltipState,
@@ -131,7 +138,13 @@ fun ChatMessageNerdLine(
 }
 
 @Composable
-private fun UsageDetails(stats: NerdStats, contextLength: Int?) {
+private fun UsageDetails(
+    stats: NerdStats,
+    contextLength: Int?,
+    localStatus: UIMessage?,
+    compressionThreshold: Int?,
+    autoCompressEnabled: Boolean,
+) {
     Column(
         verticalArrangement = Arrangement.spacedBy(2.dp),
         modifier = Modifier.padding(vertical = 4.dp),
@@ -143,6 +156,32 @@ private fun UsageDetails(stats: NerdStats, contextLength: Int?) {
             contextLength = contextLength,
             modifier = Modifier.padding(bottom = 8.dp),
         )
+        if (localStatus != null) {
+            val threshold = when {
+                !autoCompressEnabled -> stringResource(R.string.chat_message_local_disabled)
+                compressionThreshold != null -> compressionThreshold.exact()
+                else -> stringResource(R.string.chat_message_local_unknown)
+            }
+            UsageDetailRow(stringResource(R.string.chat_message_local_compression_threshold), threshold)
+            val requested = localStatus.requestedToolCount
+            val declared = localStatus.declaredToolCount
+            if (requested != null && declared != null) {
+                UsageDetailRow(stringResource(R.string.chat_message_local_tools), "$declared / $requested")
+            }
+            if (localStatus.unavailableToolNames.isNotEmpty()) {
+                Text(
+                    text = stringResource(R.string.chat_message_local_unavailable_tools,
+                        localStatus.unavailableToolNames.joinToString(", ")),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            UsageDetailRow(
+                stringResource(R.string.chat_message_local_history_trimmed),
+                stringResource(if (localStatus.contextHistoryTrimmed)
+                    R.string.chat_message_local_yes else R.string.chat_message_local_no),
+            )
+        }
         if (stats.steps > 1) {
             UsageDetailRow(stringResource(R.string.chat_message_usage_step_count), stats.steps.toString())
             if (total != null) {

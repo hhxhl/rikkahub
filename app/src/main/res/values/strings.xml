@@ -1956,4 +1956,12 @@
   <string name="setting_mcp_remote_no_approval_desc">All permitted tools can execute without confirmation, including writes. Only use with trusted servers.</string>
   <string name="setting_asr_configure_prefer_offline">Prefer offline recognition</string>
   <string name="setting_asr_configure_prefer_offline_desc">Request offline recognition when available. Turning this off allows the engine to choose online recognition.</string>
+    <string name="chat_message_local_compression_threshold">Compression threshold</string>
+    <string name="chat_message_local_disabled">Disabled</string>
+    <string name="chat_message_local_unknown">Unknown</string>
+    <string name="chat_message_local_tools">Tools declared</string>
+    <string name="chat_message_local_unavailable_tools">Unavailable tools: %1$s</string>
+    <string name="chat_message_local_history_trimmed">History trimmed</string>
+    <string name="chat_message_local_yes">Yes</string>
+    <string name="chat_message_local_no">No</string>
 </resources>

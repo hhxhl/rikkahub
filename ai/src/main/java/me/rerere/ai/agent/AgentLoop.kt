@@ -125,7 +125,7 @@ internal class AgentLoop(
     ): UIMessage {
         // 多轮工具调用共用同一条助手消息，消息上已有的 usage 和耗时来自之前的步骤。
         // 本步从清空的统计开始（merge 只适合同一次请求内的快照），再与之前的步骤累加。
-        val stepStart = base.copy(usage = null, generationTimeMs = null, contextTokenCount = null, contextHistoryTrimmed = false, contextCapacityTokens = null, unavailableToolNames = emptyList())
+        val stepStart = base.copy(usage = null, generationTimeMs = null, contextTokenCount = null, contextHistoryTrimmed = false, contextCapacityTokens = null, unavailableToolNames = emptyList(), requestedToolCount = null, declaredToolCount = null)
         return try {
             withRetry(retryFor(params), onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
                 // 每次重试都从本步开始时的消息重新合并，不会把重试的响应接在已经展示的半截回复后面；
@@ -175,6 +175,8 @@ internal class AgentLoop(
             contextHistoryTrimmed = result.message.contextHistoryTrimmed,
             contextCapacityTokens = result.message.contextCapacityTokens,
             unavailableToolNames = result.message.unavailableToolNames,
+            requestedToolCount = result.message.requestedToolCount,
+            declaredToolCount = result.message.declaredToolCount,
         ).finishReasoning().withStepStats(base, requestTime)
         preview(generated, newPartsFrom = base.parts.size)
         return generated
@@ -207,7 +209,8 @@ internal class AgentLoop(
     }
 
     private fun retryFor(params: TextGenerationParams): RetryPolicy =
-        if (params.remoteMcpTools.any { it.approvalPolicy != RemoteMcpApprovalPolicy.READ_ONLY }) RetryPolicy.NONE
+        if (request.providerSetting is ProviderSetting.LiteRtLocal ||
+            params.remoteMcpTools.any { it.approvalPolicy != RemoteMcpApprovalPolicy.READ_ONLY }) RetryPolicy.NONE
         else request.retry
 
     private suspend fun execute(tool: UIMessagePart.Tool): List<UIMessagePart> {
@@ -284,7 +287,7 @@ private fun UIMessage.withStepStats(stepBase: UIMessage, stepTime: Duration): UI
     // 上下文占用只看最后一次请求，usage 是多步累计值；本步没返回 usage 时沿用之前步骤的
     lastUsage = usage ?: stepBase.lastUsage,
     contextHistoryTrimmed = contextHistoryTrimmed || stepBase.contextHistoryTrimmed,
-    unavailableToolNames = (stepBase.unavailableToolNames + unavailableToolNames).distinct(),
+    // Tool availability is a snapshot of the last generation, not cumulative usage.
     stepCount = (stepBase.stepCount ?: 0) + 1,
 )
 

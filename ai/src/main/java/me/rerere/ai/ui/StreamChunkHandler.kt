@@ -320,6 +320,8 @@ class StreamChunkHandler(private val model: Model? = null) {
                 contextHistoryTrimmed = chunk.contextHistoryTrimmed,
                 contextCapacityTokens = chunk.contextCapacityTokens,
                 unavailableToolNames = chunk.unavailableToolNames,
+                requestedToolCount = chunk.requestedToolCount,
+                declaredToolCount = chunk.declaredToolCount,
                 finishedAt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
             ).finishReasoning().also {
                 // Finish 同时结束尚未显式结束的 reasoning，并释放本次响应流的索引状态。
@@ -369,6 +371,8 @@ fun List<UIMessage>.handleTextGenerationResult(
             contextHistoryTrimmed = incoming.contextHistoryTrimmed,
             contextCapacityTokens = incoming.contextCapacityTokens,
             unavailableToolNames = incoming.unavailableToolNames,
+            requestedToolCount = incoming.requestedToolCount,
+            declaredToolCount = incoming.declaredToolCount,
             finishedAt = incoming.finishedAt,
         ).finishReasoning()
     }

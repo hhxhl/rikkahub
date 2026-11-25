@@ -1958,4 +1958,12 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="setting_mcp_remote_no_approval_desc">允许在令牌权限范围内自动执行工具，包括写入操作。仅用于可信服务器。</string>
   <string name="setting_asr_configure_prefer_offline">优先离线识别</string>
   <string name="setting_asr_configure_prefer_offline_desc">请求优先使用离线识别。关闭后允许识别引擎选择在线识别。</string>
+    <string name="chat_message_local_compression_threshold">自动压缩阈值</string>
+    <string name="chat_message_local_disabled">已关闭</string>
+    <string name="chat_message_local_unknown">未知</string>
+    <string name="chat_message_local_tools">工具状态</string>
+    <string name="chat_message_local_unavailable_tools">未声明工具：%1$s</string>
+    <string name="chat_message_local_history_trimmed">历史裁剪</string>
+    <string name="chat_message_local_yes">是</string>
+    <string name="chat_message_local_no">无</string>
 </resources>

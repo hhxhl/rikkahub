@@ -1952,4 +1952,12 @@
   <string name="setting_mcp_remote_no_approval_desc">允許在權杖權限範圍內自動執行工具，包括寫入操作。僅用於可信伺服器。</string>
   <string name="setting_asr_configure_prefer_offline">優先離線辨識</string>
   <string name="setting_asr_configure_prefer_offline_desc">要求優先使用離線辨識。關閉後允許辨識引擎選擇線上辨識。</string>
+    <string name="chat_message_local_compression_threshold">自動壓縮閾值</string>
+    <string name="chat_message_local_disabled">已關閉</string>
+    <string name="chat_message_local_unknown">未知</string>
+    <string name="chat_message_local_tools">工具狀態</string>
+    <string name="chat_message_local_unavailable_tools">未宣告工具：%1$s</string>
+    <string name="chat_message_local_history_trimmed">歷史裁剪</string>
+    <string name="chat_message_local_yes">是</string>
+    <string name="chat_message_local_no">無</string>
 </resources>
