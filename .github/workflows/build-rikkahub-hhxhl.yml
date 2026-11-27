@@ -112,3 +112,42 @@ jobs:
           path: app/build/outputs/apk/github/release/*.apk
           if-no-files-found: error
           retention-days: 30
+
+  cleanup:
+    needs: build
+    if: ${{ always() && github.ref == 'refs/heads/master-hhxhl' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Keep latest 5 workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_RUN: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WORKFLOW_ID=$(gh api \
+            "repos/$REPO/actions/runs/$CURRENT_RUN" \
+            --jq '.workflow_id')
+
+          gh api --paginate --slurp \
+            "repos/$REPO/actions/workflows/$WORKFLOW_ID/runs?per_page=100" |
+          jq -r '
+            [.[].workflow_runs[]]
+            | sort_by(.run_number)
+            | reverse
+            | .[5:][]
+            | select(.status == "completed")
+            | .id
+          ' |
+          while read -r RUN_ID; do
+            if [[ "$RUN_ID" != "$CURRENT_RUN" ]]; then
+              echo "Deleting workflow run $RUN_ID"
+              gh api --method DELETE \
+                "repos/$REPO/actions/runs/$RUN_ID"
+            fi
+          done
